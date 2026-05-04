@@ -95,3 +95,22 @@ test("JSON_EXTRACT inside logical operators", () => {
   expect(result.sql).toBe('WHERE (JSON_EXTRACT("pricing", \'$.total\') > ?) AND (JSON_EXTRACT("status", \'$.group\') = ?)');
   expect(result.params).toEqual([100, "active"]);
 });
+
+test("JSON_EXTRACT inside OR with dotted paths", () => {
+  const result = buildWhere<typeof NestedSchema>({
+    OR: [
+      { "pricing.total": { gt: 100 } },
+      { "status.group": { eq: "active" } }
+    ]
+  });
+  expect(result.sql).toBe('WHERE (JSON_EXTRACT("pricing", \'$.total\') > ? OR JSON_EXTRACT("status", \'$.group\') = ?)');
+  expect(result.params).toEqual([100, "active"]);
+});
+
+test("JSON_EXTRACT inside NOT with dotted path", () => {
+  const result = buildWhere<typeof NestedSchema>({
+    NOT: { "pricing.total": { gt: 100 } }
+  });
+  expect(result.sql).toBe('WHERE NOT (JSON_EXTRACT("pricing", \'$.total\') > ?)');
+  expect(result.params).toEqual([100]);
+});

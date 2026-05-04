@@ -149,6 +149,8 @@ export type ScalarFilter<V> = V extends string
   | { isNotNull: true }
   : V extends boolean
   ? { eq: V } | { isNull: true } | { isNotNull: true }
+  : V extends object
+  ? { eq: V } | { ne: V } | { isNull: true } | { isNotNull: true }
   : { isNull: true } | { isNotNull: true };
 
 /**
