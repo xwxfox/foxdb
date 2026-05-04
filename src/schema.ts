@@ -85,9 +85,9 @@ export function buildColumns(properties: TProperties): ColumnMeta[] {
   const cols: ColumnMeta[] = [];
   for (const [name, raw] of Object.entries(properties)) {
     if (IsArray(raw)) {
-      const { schema, optional } = unwrapOptional(raw);
+      const { optional } = unwrapOptional(raw);
       // Arrays of objects → handled as sub-table (skip here)
-      if (IsObject(schema.items)) continue;
+      if (IsObject(raw.items)) continue;
       // Arrays of primitives → JSON TEXT
       cols.push({ name, sqlType: "TEXT", nullable: optional, optional });
       continue;
