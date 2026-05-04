@@ -35,30 +35,41 @@ function isFilterShape(value: unknown): value is FilterShape {
   return typeof value === "object" && value !== null;
 }
 
+function resolveJsonColumn(column: string): { sql: string } | null {
+  const parts = column.split(".");
+  if (parts.length < 2) return null;
+  const jsonColumn = parts[0];
+  const path = parts.slice(1).join(".");
+  return { sql: `JSON_EXTRACT("${jsonColumn}", '$.${path}')` };
+}
+
 function buildFilter(column: string, filter: FilterShape): FilterEntry {
-  if ("eq" in filter) return { sql: `"${column}" = ?`, params: [filter.eq] };
-  if ("ne" in filter) return { sql: `"${column}" != ?`, params: [filter.ne] };
-  if ("gt" in filter) return { sql: `"${column}" > ?`, params: [filter.gt] };
-  if ("gte" in filter) return { sql: `"${column}" >= ?`, params: [filter.gte] };
-  if ("lt" in filter) return { sql: `"${column}" < ?`, params: [filter.lt] };
-  if ("lte" in filter) return { sql: `"${column}" <= ?`, params: [filter.lte] };
-  if ("like" in filter) return { sql: `"${column}" LIKE ?`, params: [filter.like] };
+  const jsonCol = resolveJsonColumn(column);
+  const colRef = jsonCol ? jsonCol.sql : `"${column}"`;
+
+  if ("eq" in filter) return { sql: `${colRef} = ?`, params: [filter.eq] };
+  if ("ne" in filter) return { sql: `${colRef} != ?`, params: [filter.ne] };
+  if ("gt" in filter) return { sql: `${colRef} > ?`, params: [filter.gt] };
+  if ("gte" in filter) return { sql: `${colRef} >= ?`, params: [filter.gte] };
+  if ("lt" in filter) return { sql: `${colRef} < ?`, params: [filter.lt] };
+  if ("lte" in filter) return { sql: `${colRef} <= ?`, params: [filter.lte] };
+  if ("like" in filter) return { sql: `${colRef} LIKE ?`, params: [filter.like] };
   if ("between" in filter) {
     const [lo, hi] = filter.between;
-    return { sql: `"${column}" BETWEEN ? AND ?`, params: [lo, hi] };
+    return { sql: `${colRef} BETWEEN ? AND ?`, params: [lo, hi] };
   }
   if ("in" in filter) {
     const vals = filter.in;
     const placeholders = vals.map(() => "?").join(", ");
-    return { sql: `"${column}" IN (${placeholders})`, params: [...vals] };
+    return { sql: `${colRef} IN (${placeholders})`, params: [...vals] };
   }
   if ("notIn" in filter) {
     const vals = filter.notIn;
     const placeholders = vals.map(() => "?").join(", ");
-    return { sql: `"${column}" NOT IN (${placeholders})`, params: [...vals] };
+    return { sql: `${colRef} NOT IN (${placeholders})`, params: [...vals] };
   }
-  if ("isNull" in filter) return { sql: `"${column}" IS NULL`, params: [] };
-  if ("isNotNull" in filter) return { sql: `"${column}" IS NOT NULL`, params: [] };
+  if ("isNull" in filter) return { sql: `${colRef} IS NULL`, params: [] };
+  if ("isNotNull" in filter) return { sql: `${colRef} IS NOT NULL`, params: [] };
   raise("UNKNOWN_FILTER", `foxdb: unknown filter operator for column "${column}"`, { column });
 }
 

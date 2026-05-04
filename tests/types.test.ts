@@ -94,4 +94,27 @@ function _compileTimeChecks() {
   void agg[0].wrong;
 
   orm._close();
+
+  // ─── JSON path dotted paths are accepted in where clauses ─────────────────────
+
+  const NestedSchema = Object({
+    id: Number(),
+    pricing: Object({ total: Number(), currency: String() }),
+    status: Object({ group: String(), blocked: Boolean() }),
+  });
+  const nested = table(NestedSchema, (s) => ({ primaryKey: s.id }));
+  const nestedOrm = createORM({ tables: { nested } });
+
+  // Dotted paths should be accepted
+  nestedOrm.nested.findMany({ where: { "pricing.total": { gt: 100 } } });
+  nestedOrm.nested.findMany({ where: { "status.group": { eq: "active" } } });
+  nestedOrm.nested.findMany({ where: { "pricing.currency": { in: ["DKK", "EUR"] } } });
+
+  // Direct nested object comparison should still work
+  nestedOrm.nested.findMany({ where: { pricing: { eq: { total: 100, currency: "DKK" } } } });
+
+  // @ts-expect-error — "pricing.nonexistent" is not a valid dotted path
+  void nestedOrm.nested.findMany({ where: { "pricing.nonexistent": { gt: 100 } } });
+
+  nestedOrm._close();
 }

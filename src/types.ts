@@ -76,6 +76,13 @@ export type ScalarPath<T extends TObject> =
   | ScalarKeys<T>
   | SubTableScalarPath<T>;
 
+/** @internal */
+export type JsonPath<T extends TObject> = {
+  [K in keyof T["properties"] & string]: T["properties"][K] extends TObject
+    ? `${K}.${keyof T["properties"][K]["properties"] & string}`
+    : never;
+}[keyof T["properties"] & string];
+
 // ─── Static inference shortcuts ──────────────────────────────────────────────
 
 /**
@@ -166,6 +173,8 @@ export type ScalarFilter<V> = V extends string
  */
 export type WhereClause<T extends TObject> = {
   [K in ScalarKeys<T>]?: ScalarFilter<Static<T["properties"][K]>>;
+} & {
+  [K in JsonPath<T>]?: ScalarFilter<any>;
 } & {
   AND?: WhereClause<T>[];
   OR?: WhereClause<T>[];
