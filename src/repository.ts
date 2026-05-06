@@ -287,13 +287,17 @@ export class Repository<
 
     if (ev.maxRows) {
       const orderCol = ev.lruColumn ?? this.descriptor.primaryKey.name;
+      const countResult = this.db.prepare(`SELECT COUNT(*) as c FROM "${this.tableName}"`).get() as { c: number };
+      const count = countResult.c;
+      if (count <= ev.maxRows) return;
+      const toDelete = count - ev.maxRows;
       this._executor.exec(
         `DELETE FROM "${this.tableName}" WHERE "${this.descriptor.primaryKey.name}" IN (
           SELECT "${this.descriptor.primaryKey.name}" FROM "${this.tableName}"
           ORDER BY "${orderCol}" ASC
-          LIMIT (SELECT COUNT(*) - ? FROM "${this.tableName}")
+          LIMIT ?
         )`,
-        [ev.maxRows],
+        [toDelete],
         "evict"
       );
     }

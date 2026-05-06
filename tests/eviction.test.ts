@@ -9,6 +9,11 @@ const CacheSchema = Object({
   lastAccessedAt: Integer(),
 });
 
+const ItemSchema = Object({
+  id: String(),
+  name: String(),
+});
+
 function makeORM() {
   return createORM({
     tables: {
@@ -32,5 +37,27 @@ describe("bounded tables", () => {
     // Force sweep
     (orm.cache as any)._runEviction();
     expect(orm.cache.count()).toBeLessThanOrEqual(5);
+  });
+
+  test("eviction does not delete all rows when count < maxRows", () => {
+    const orm2 = createORM({
+      path: ":memory:",
+      rebuildOnLaunch: true,
+      tables: {
+        items: table(ItemSchema, (s) => ({
+          primaryKey: s.id,
+          eviction: { maxRows: 10 },
+        })),
+      },
+    });
+    // Insert 5 rows (below maxRows of 10)
+    for (let i = 1; i <= 5; i++) {
+      orm2.items.insert({ id: `${i}`, name: `item-${i}` });
+    }
+    expect(orm2.items.count()).toBe(5);
+    // Trigger eviction by inserting one more
+    orm2.items.insert({ id: "6", name: "item-6" });
+    expect(orm2.items.count()).toBe(6); // Should still be 6, not 0
+    orm2._close();
   });
 });
