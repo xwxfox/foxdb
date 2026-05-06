@@ -42,7 +42,7 @@ export interface SubTableMeta {
   /** e.g. "sales__lineItems" */
   tableName: string;
   /** Schema of a single item in the array */
-  itemSchema: TObject;
+  itemSchema: TSchema & { properties: Record<string, TSchema> };
   /** Columns of the sub-table row (owner PK is prepended automatically) */
   columns: ColumnMeta[];
 }
@@ -64,6 +64,20 @@ function unwrapOptional(schema: TSchema): { schema: TSchema; optional: boolean }
     return { schema, optional: true };
   }
   return { schema, optional: false };
+}
+
+/**
+ * Detect schemas like `Type.Union([Type.String(), Type.Null()])` which are
+ * nullable without being wrapped in `Type.Optional()`.
+ */
+function isNullableUnion(schema: TSchema): boolean {
+  const s = schema as Record<string, unknown>;
+  if (s.anyOf && Array.isArray(s.anyOf)) {
+    return (s.anyOf as Array<Record<string, unknown>>).some(
+      (item) => item.type === "null"
+    );
+  }
+  return false;
 }
 
 function schemaToSqlType(schema: TSchema): SqliteType {
@@ -94,11 +108,12 @@ export function buildColumns(properties: TProperties): ColumnMeta[] {
     }
     if (IsObject(raw)) continue; // nested objects are JSON-encoded as TEXT
     const { schema, optional } = unwrapOptional(raw);
+    const nullable = optional || isNullableUnion(schema);
     cols.push({
       name,
       sqlType: IsObject(schema) ? "TEXT" : schemaToSqlType(schema),
-      nullable: optional,
-      optional,
+      nullable,
+      optional: nullable,
     });
   }
   // Also handle nested plain objects encoded as JSON TEXT
@@ -115,7 +130,7 @@ export function buildColumns(properties: TProperties): ColumnMeta[] {
 /** @category Advanced */
 export function introspectTable(
   tableName: string,
-  schema: TObject
+  schema: TSchema & { properties: Record<string, TSchema> }
 ): TableMeta {
   const columns: ColumnMeta[] = [];
   const subTables: SubTableMeta[] = [];
@@ -140,11 +155,12 @@ export function introspectTable(
       columns.push({ name: fieldName, sqlType: "TEXT", nullable: false, optional: false });
     } else {
       const { schema: inner, optional } = unwrapOptional(raw);
+      const nullable = optional || isNullableUnion(inner);
       columns.push({
         name: fieldName,
         sqlType: schemaToSqlType(inner),
-        nullable: optional,
-        optional,
+        nullable,
+        optional: nullable,
       });
     }
   }

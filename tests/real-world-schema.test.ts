@@ -11,206 +11,7 @@ import {
 } from "typebox";
 import { createORM, table } from "../src/index.ts";
 
-// ─── helpers mimicking @inside/models conventions ────────────────────────────
-
-function StrictObject<T extends Record<string, any>>(properties: T) {
-  return Object(properties, { additionalProperties: false });
-}
-
-const DateValueSchema = String();
-const NullableStringSchema = Optional(Union([String(), Null()]));
-const NullableNumberSchema = Optional(Union([Number(), Null()]));
-
-// ─── nested schemas (sufficiently complete for the integration test) ─────────
-
-const CustomerDeliveryAddressSchema = StrictObject({
-  AddressField1: NullableStringSchema,
-  AddressField2: NullableStringSchema,
-  AddressField3: NullableStringSchema,
-  AddressField4: NullableStringSchema,
-  AddressField5: NullableStringSchema,
-  Country: NullableStringSchema,
-  Attention: NullableStringSchema,
-  Phone: NullableStringSchema,
-  NoteEmail: NullableStringSchema,
-});
-
-const CustomerAddressSchema = StrictObject({
-  AddressField1: NullableStringSchema,
-  AddressField2: NullableStringSchema,
-  AddressField3: NullableStringSchema,
-  State: NullableStringSchema,
-  ZipCity: NullableStringSchema,
-  Country: NullableStringSchema,
-  Attention: NullableStringSchema,
-  DeliveryAddress: CustomerDeliveryAddressSchema,
-});
-
-const CustomerContactSchema = StrictObject({
-  Phone: NullableStringSchema,
-  Fax: NullableStringSchema,
-  Email: NullableStringSchema,
-});
-
-const SaleCustomerInfoSchema = StrictObject({
-  CustomerName: String(),
-  CustomerAddress: CustomerAddressSchema,
-  CustomerContact: CustomerContactSchema,
-});
-
-const ShippingFreightSchema = StrictObject({
-  Weight: NullableNumberSchema,
-  Length: NullableNumberSchema,
-  Height: NullableNumberSchema,
-  Width: NullableNumberSchema,
-});
-
-const ShippingSchema = StrictObject({
-  DeliveryTerms: NullableStringSchema,
-  TrackingNumber: NullableStringSchema,
-  TrackingType: NullableNumberSchema,
-  ShippingService: NullableStringSchema,
-  ShippingAccountType: NullableStringSchema,
-  FreightDimensions: ShippingFreightSchema,
-});
-
-const ReferenceSchema = StrictObject({
-  YourRef: NullableStringSchema,
-  OurRef: NullableStringSchema,
-  Purpose: NullableStringSchema,
-  SalesChannel: NullableStringSchema,
-});
-
-const SalePricingSchema = StrictObject({
-  TotalMargin: Number(),
-  TotalTurnover: Number(),
-  TotalCostPrice: Number(),
-  TotalMarginDKK: Number(),
-  TotalTurnoverDKK: Number(),
-  TotalCostPriceDKK: Number(),
-  Invoices: Array(
-    StrictObject({
-      RowNumber: Number(),
-      LastChanged: DateValueSchema,
-      BudgetCode: Optional(Union([String(), Null()])),
-      Account: Number(),
-      Department: NullableStringSchema,
-      Date: DateValueSchema,
-      InvoiceNumber: Number(),
-      Voucher: NullableStringSchema,
-      Text: NullableStringSchema,
-      TransactionType: Number(),
-      AmountMST: Number(),
-      AmountCur: Number(),
-      Currency: NullableStringSchema,
-      Vat: Optional(Union([String(), Null()])),
-      VatAmount: Number(),
-      Approved: Boolean(),
-      ApprovedBy: NullableStringSchema,
-      CashDiscountAmount: Number(),
-      CashDiscountDate: Optional(Union([DateValueSchema, Null()])),
-      DueDate: Optional(Union([DateValueSchema, Null()])),
-      Open: Boolean(),
-      ExchangeRate: Number(),
-      Reserved2: NullableNumberSchema,
-      Reserved3: NullableNumberSchema,
-      PostedDiffAmount: Number(),
-      RefRecId: NullableNumberSchema,
-      Transaction: Number(),
-      ReminderCode: NullableNumberSchema,
-      CashDiscount: NullableNumberSchema,
-      RemindedDate: Optional(Union([DateValueSchema, Null()])),
-      ExchangeRateTri: Number(),
-      PaymentId: NullableStringSchema,
-      Centre: NullableStringSchema,
-      Purpose: NullableStringSchema,
-      PaymentMode: NullableStringSchema,
-      ReminderSent: Boolean(),
-    })
-  ),
-  VATNumber: NullableStringSchema,
-  VATNumberType: NullableStringSchema,
-  Currency: NullableStringSchema,
-  EstimatedOrderExchangeRate: Number(),
-  PaymentTerms: NullableStringSchema,
-});
-
-const SaleStatusSchema = StrictObject({
-  Blocked: Boolean(),
-  OrderPhase: Number(),
-  IsSalesPhase: Number(),
-  Group: String(),
-  ExtendedDocumentsLink: NullableStringSchema,
-  OrderStatus: NullableStringSchema,
-});
-
-const SaleHandledBySchema = StrictObject({
-  SalesRep: NullableStringSchema,
-  Bearer: NullableStringSchema,
-  PickedBy: NullableStringSchema,
-  TestedBy: NullableStringSchema,
-  PackedBy: NullableStringSchema,
-  BookedBy: NullableStringSchema,
-});
-
-const SaleTestingSchema = StrictObject({
-  TestHours: NullableNumberSchema,
-  TestMinutes: NullableNumberSchema,
-});
-
-// Simplified LogEntrySchema – FoxDB stores Logs as JSON TEXT because
-// the real LogEntrySchema is a union of objects (IsObject === false).
-const LogEntrySchema = StrictObject({
-  raw: String(),
-  timestamp: DateValueSchema,
-  type: String(),
-});
-
-export const SaleLineItemSchema = StrictObject({
-  OrderNumber: Number(),
-  LineNumber: Number(),
-  ItemNumber: NullableStringSchema,
-  ItemName: NullableStringSchema,
-  Location: NullableStringSchema,
-  ManufacturerGroup: NullableStringSchema,
-  Quantity: Number(),
-  Discount: Number(),
-  Price: Number(),
-  PriceDKK: Number(),
-  PriceAmount: Number(),
-  PriceAmountDKK: Number(),
-  CostPrice: Number(),
-  CostPriceAmount: Number(),
-  Margin: Number(),
-  DeliverNow: Number(),
-  CreatedDate: DateValueSchema,
-  DeliveryDate: DateValueSchema,
-  SerialNumber: NullableStringSchema,
-  Delivered: Number(),
-  LastChanged: DateValueSchema,
-});
-
-export const SaleSchema = StrictObject({
-  OrderNumber: Number(),
-  OrderTransaction: Number(),
-  InvoiceNumbers: Array(Number()),
-  LastChanged: DateValueSchema,
-  CreatedDate: DateValueSchema,
-  DocumentDate: String(),
-  DeliveryDate: DateValueSchema,
-  Account: Number(),
-  InvoiceAccount: Number(),
-  SearchName: String(),
-  CustomerInfo: SaleCustomerInfoSchema,
-  Pricing: SalePricingSchema,
-  Shipping: ShippingSchema,
-  Reference: ReferenceSchema,
-  Status: SaleStatusSchema,
-  HandledBy: SaleHandledBySchema,
-  Testing: SaleTestingSchema,
-  Logs: Array(LogEntrySchema),
-  SalesLineItems: Optional(Array(SaleLineItemSchema)),
-});
+import { LogEntryType, SaleSchema } from "./real-world-types";
 
 // ─── test factory ────────────────────────────────────────────────────────────
 
@@ -357,8 +158,8 @@ function createFullSale(orderNumber: number): any {
       TestMinutes: null,
     },
     Logs: [
-      { raw: "Order created", timestamp: "2024-01-10T08:00:00Z", type: "ORDER_CREATED" },
-      { raw: "Order confirmed", timestamp: "2024-01-11T09:00:00Z", type: "CONFIRMED" },
+      { raw: "Order created", timestamp: "2024-01-10T08:00:00Z", type: "ORDER_CREATED", metadata: [], metatags: [] },
+      { raw: "Order confirmed", timestamp: "2024-01-11T09:00:00Z", type: "ORDER_CREATED", metadata: [], metatags: [] },
     ],
     SalesLineItems: [
       {
@@ -413,7 +214,7 @@ function createFullSale(orderNumber: number): any {
 
 // ─── integration tests ───────────────────────────────────────────────────────
 
-describe("intranet SaleSchema integration", () => {
+describe("real-world SaleSchema integration", () => {
   test("roundtrip: insert full sale and findById hydrates everything", () => {
     const orm = makeORM();
     const input = createFullSale(1);
@@ -440,7 +241,7 @@ describe("intranet SaleSchema integration", () => {
 
     expect(s.Pricing.TotalTurnoverDKK).toBe(2500);
     expect(s.Pricing.Invoices).toHaveLength(1);
-    expect(s.Pricing.Invoices[0].InvoiceNumber).toBe(1001);
+    expect(s.Pricing.Invoices[0]!.InvoiceNumber).toBe(1001);
 
     expect(s.Shipping.TrackingNumber).toBe("TRACK123");
     expect(s.Reference.YourRef).toBe("PO-12345");
@@ -453,12 +254,12 @@ describe("intranet SaleSchema integration", () => {
 
     // Logs array (stored as JSON TEXT)
     expect(s.Logs).toHaveLength(2);
-    expect(s.Logs[0].type).toBe("ORDER_CREATED");
+    expect(s.Logs[0]!.type).toBe(LogEntryType.ORDER_CREATED);
 
     // Sub-table hydrated
     expect(s.SalesLineItems).toHaveLength(2);
-    expect(s.SalesLineItems[0].ManufacturerGroup).toBe("PNP");
-    expect(s.SalesLineItems[1].ManufacturerGroup).toBe("TECH");
+    expect(s.SalesLineItems![0]!.ManufacturerGroup).toBe("PNP");
+    expect(s.SalesLineItems![1]!.ManufacturerGroup).toBe("TECH");
 
     orm._close();
   });
@@ -470,7 +271,7 @@ describe("intranet SaleSchema integration", () => {
 
     const results = orm.sales.findMany({ where: { Account: { eq: 42 } } });
     expect(results).toHaveLength(1);
-    expect(results[0].OrderNumber).toBe(1);
+    expect(results[0]!.OrderNumber).toBe(1);
 
     orm._close();
   });
@@ -484,7 +285,7 @@ describe("intranet SaleSchema integration", () => {
       where: { "Pricing.TotalTurnoverDKK": { gt: 1000 } },
     });
     expect(results).toHaveLength(1);
-    expect(results[0].OrderNumber).toBe(1);
+    expect(results[0]!.OrderNumber).toBe(1);
 
     orm._close();
   });
@@ -498,7 +299,7 @@ describe("intranet SaleSchema integration", () => {
       where: { "Status.Group": { eq: "PNP" } },
     });
     expect(results).toHaveLength(1);
-    expect(results[0].OrderNumber).toBe(1);
+    expect(results[0]!.OrderNumber).toBe(1);
 
     orm._close();
   });
@@ -512,7 +313,7 @@ describe("intranet SaleSchema integration", () => {
       where: { "HandledBy.SalesRep": { eq: "ABC" } },
     });
     expect(results).toHaveLength(1);
-    expect(results[0].OrderNumber).toBe(1);
+    expect(results[0]!.OrderNumber).toBe(1);
 
     orm._close();
   });
@@ -532,7 +333,7 @@ describe("intranet SaleSchema integration", () => {
       },
     });
     expect(results).toHaveLength(1);
-    expect(results[0].OrderNumber).toBe(1);
+    expect(results[0]!.OrderNumber).toBe(1);
 
     orm._close();
   });
@@ -563,9 +364,9 @@ describe("intranet SaleSchema integration", () => {
 
     const results = orm.sales.findMany({ include: ["SalesLineItems"] });
     expect(results).toHaveLength(1);
-    expect(results[0].SalesLineItems).toHaveLength(2);
-    expect(results[0].SalesLineItems[0].ItemNumber).toBe("WID-001");
-    expect(results[0].SalesLineItems[1].ItemNumber).toBe("GAD-002");
+    expect(results[0]!.SalesLineItems).toHaveLength(2);
+    expect(results[0]!.SalesLineItems![0]!.ItemNumber).toBe("WID-001");
+    expect(results[0]!.SalesLineItems![1]!.ItemNumber).toBe("GAD-002");
 
     orm._close();
   });
@@ -576,7 +377,7 @@ describe("intranet SaleSchema integration", () => {
 
     const results = orm.sales.findMany({ include: [] });
     expect(results).toHaveLength(1);
-    expect(results[0].SalesLineItems).toEqual([]);
+    expect(results[0]!.SalesLineItems).toEqual([]);
 
     orm._close();
   });

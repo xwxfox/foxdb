@@ -10,6 +10,7 @@
   "scripts": {
     "build": "bunup",
     "docs": "bun run docs.ts",
+    "bench": "bun run ./benchmarks/real-world-schema-bench.ts",
     "release": "bun run publish.ts"
   },
   "keywords": [

@@ -1,10 +1,10 @@
 /**
- * foxdb/src/table.ts
+ * bunorm/src/table.ts
  * User-facing helper that wraps a schema + configuration into a descriptor.
  * Guarantees compile-time safety for PK and index columns via ColumnRef.
  */
 
-import type { TObject } from "typebox";
+import type { TObject, TSchema } from "typebox";
 import type { ColumnRef, TScalarSchema, ColumnRefs } from "./columns.ts";
 import { createColumnProxy } from "./columns.ts";
 import type { IndexDefinition, TimestampConfig, TableConfig, EvictionConfig, CompressionConfig } from "./types.ts";
@@ -16,7 +16,7 @@ export interface SubTableConfig {
 
 /** @category Schema */
 export interface TableDescriptor<
-  T extends TObject,
+  T extends TSchema & { properties: Record<string, TSchema> },
   PK extends string,
   TS extends TimestampConfig = undefined
 > extends TableConfig<T, PK, TS> { }
@@ -49,7 +49,7 @@ export interface TableConfigShape<PK extends string, TS extends TimestampConfig>
  * @category Schema
  */
 export function table<
-  T extends TObject,
+  T extends TSchema & { properties: Record<string, TSchema> },
   PK extends string,
   const TS extends boolean
 >(
@@ -59,7 +59,7 @@ export function table<
 
 /** @category Schema */
 export function table<
-  T extends TObject,
+  T extends TSchema & { properties: Record<string, TSchema> },
   PK extends string,
   const TS extends { createdAt?: string; updatedAt?: string }
 >(
@@ -69,7 +69,7 @@ export function table<
 
 /** @category Schema */
 export function table<
-  T extends TObject,
+  T extends TSchema & { properties: Record<string, TSchema> },
   PK extends string
 >(
   schema: T,
@@ -78,7 +78,7 @@ export function table<
 
 /** @category Schema */
 export function table<
-  T extends TObject,
+  T extends TSchema & { properties: Record<string, TSchema> },
   PK extends string,
   TS extends TimestampConfig
 >(

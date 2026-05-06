@@ -4,7 +4,7 @@
  * Never does string interpolation of user values - always uses ? placeholders.
  */
 
-import type { TObject } from "typebox";
+import type { TObject, TSchema } from "typebox";
 import type {
   WhereClause,
   OrderByClause,
@@ -101,7 +101,7 @@ export interface WhereResult {
  * **Known limitation:** `AND`, `OR`, and `NOT` are reserved keys and cannot
  * be used as column names in schemas.
  */
-export type WhereLogic<T extends TObject = TObject> = {
+export type WhereLogic<T extends TSchema & { properties: Record<string, TSchema> } = TSchema & { properties: Record<string, TSchema> }> = {
   AND?: WhereClause<T>[];
   OR?: WhereClause<T>[];
   NOT?: WhereClause<T>;
@@ -156,7 +156,7 @@ function isTriviallyFalse(where: unknown): boolean {
   return false;
 }
 
-function buildWhereRecursive<T extends TObject>(
+function buildWhereRecursive<T extends TSchema & { properties: Record<string, TSchema> }>(
   where: WhereClause<T> | undefined,
   softDeleteColumn?: string
 ): { sql: string; params: unknown[] } {
@@ -241,7 +241,7 @@ function buildWhereRecursive<T extends TObject>(
   return { sql: `WHERE ${parts.join(" AND ")}`, params };
 }
 
-export function buildWhere<T extends TObject>(
+export function buildWhere<T extends TSchema & { properties: Record<string, TSchema> }>(
   where: WhereClause<T> | undefined,
   softDeleteColumn?: string
 ): WhereResult {
@@ -250,7 +250,7 @@ export function buildWhere<T extends TObject>(
 
 // ─── ORDER BY builder ─────────────────────────────────────────────────────────
 
-export function buildOrderBy<T extends TObject>(
+export function buildOrderBy<T extends TSchema & { properties: Record<string, TSchema> }>(
   orderBy: FindOptions<T>["orderBy"]
 ): string {
   if (!orderBy) return "";
@@ -290,7 +290,7 @@ export interface SelectResult {
   countParams: unknown[];
 }
 
-export function buildSelectSql<T extends TObject>(
+export function buildSelectSql<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
   opts: FindOptions<T>,
   softDeleteColumn?: string
@@ -333,7 +333,7 @@ export function buildSelectSql<T extends TObject>(
   };
 }
 
-export function buildSelect<T extends TObject>(
+export function buildSelect<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
   opts: FindOptions<T>,
   softDeleteColumn?: string
@@ -407,7 +407,7 @@ export function buildUpsert(
 
 // ─── UPDATE builder ───────────────────────────────────────────────────────────
 
-export function buildUpdate<T extends TObject>(
+export function buildUpdate<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
   pk: string,
   pkValue: unknown,
@@ -426,7 +426,7 @@ export function buildUpdate<T extends TObject>(
 
 // ─── DELETE builder ───────────────────────────────────────────────────────────
 
-export function buildDelete<T extends TObject>(
+export function buildDelete<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
   where: WhereClause<T>
 ): { sql: string; params: unknown[] } {

@@ -30,12 +30,11 @@ describe("bounded tables", () => {
   beforeEach(() => { orm = makeORM(); });
   afterEach(() => orm._close());
 
-  test("eviction removes rows over maxRows", () => {
+  test("eviction removes rows over maxRows automatically on insert", () => {
     for (let i = 0; i < 10; i++) {
       orm.cache.insert({ id: `${i}`, data: "x", createdAt: Date.now(), lastAccessedAt: Date.now() });
     }
-    // Force sweep
-    (orm.cache as any)._runEviction();
+    // Eviction should have run automatically after each insert
     expect(orm.cache.count()).toBeLessThanOrEqual(5);
   });
 

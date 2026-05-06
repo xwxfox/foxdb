@@ -44,7 +44,7 @@ export interface ColumnRef<N extends string = string, S extends TScalarSchema = 
  * map of scalar columns to their typed refs
  * @category Schema
  */
-export type ColumnRefs<T extends TObject> = {
+export type ColumnRefs<T extends TSchema & { properties: Record<string, TSchema> }> = {
   readonly [K in keyof T["properties"]as T["properties"][K] extends TScalarSchema
   ? K
   : never]: T["properties"][K] extends TScalarSchema
@@ -64,7 +64,7 @@ function isScalarSchema(prop: TSchema): prop is TScalarSchema {
 }
 
 /** @internal */
-export function createColumnProxy<T extends TObject>(schema: T): ColumnRefs<T> {
+export function createColumnProxy<T extends TSchema & { properties: Record<string, TSchema> }>(schema: T): ColumnRefs<T> {
   const proxy: Record<string, ColumnRef<string, TScalarSchema>> = {};
   for (const key of Object.keys(schema.properties)) {
     const prop = schema.properties[key];

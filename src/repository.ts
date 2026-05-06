@@ -6,7 +6,7 @@
  */
 
 import { Compile } from "typebox/compile";
-import type { TObject, TProperties } from "typebox";
+import type { TObject, TProperties, TSchema } from "typebox";
 import type {
   Infer,
   ScalarKeys,
@@ -82,7 +82,7 @@ import type { TimestampConfig } from "./timestamps.ts";
  * ```
  */
 export class Repository<
-  T extends TObject,
+  T extends TSchema & { properties: Record<string, TSchema> },
   PK extends ScalarKeys<T>,
   Mat = never,
   TS = {}
@@ -380,8 +380,11 @@ export class Repository<
         }
       });
 
-      this._emit("insert", { data: parsed });
-      return this._wrap(this._record(parsed));
+      if (this.descriptor.eviction) {
+        this._runEviction();
+      }
+      this._emit("insert", { data: obj });
+      return this._wrap(obj);
     });
   }
 
@@ -401,13 +404,14 @@ export class Repository<
   insertMany(records: InsertData<T>[]): Entity<Infer<T>, Mat, TS>[] {
     return withTrace("repository.insertMany", { table: this.tableName }, () => {
       const parsed = records.map((r) => this.parse(r));
-      const flatRows = parsed.map((p) => {
+      const objs = parsed.map((p) => {
         const obj = this._record(p);
         const now = Date.now();
         if (this._timestampNames.createdAt) obj[this._timestampNames.createdAt] = now;
         if (this._timestampNames.updatedAt) obj[this._timestampNames.updatedAt] = now;
-        return flattenRow(obj, this.meta, this._codecs);
+        return obj;
       });
+      const flatRows = objs.map((obj) => flattenRow(obj, this.meta, this._codecs));
 
       this.db.transaction(() => {
         const batches = buildInsertMany(this.tableName, flatRows);
@@ -415,8 +419,7 @@ export class Repository<
           this._executor.exec(sql, params as SQLQueryBindings[], "insertMany");
         }
         // Sub-tables still insert individually per parent
-        for (const p of parsed) {
-          const obj = this._record(p);
+        for (const obj of objs) {
           const pkVal = obj[this.descriptor.primaryKey.name];
           for (const sub of this.meta.subTables) {
             const items = obj[sub.fieldName];
@@ -430,8 +433,11 @@ export class Repository<
         }
       });
 
-      this._emit("insertMany", { data: parsed });
-      return parsed.map((p) => this._wrap(this._record(p)));
+      if (this.descriptor.eviction) {
+        this._runEviction();
+      }
+      this._emit("insertMany", { data: objs });
+      return objs.map((obj) => this._wrap(obj));
     });
   }
 
@@ -538,6 +544,9 @@ export class Repository<
         }
       });
 
+      if (this.descriptor.eviction) {
+        this._runEviction();
+      }
       this._emit("upsert", { data: parsed });
       return this._wrap(this._record(parsed));
     });
@@ -951,7 +960,7 @@ export class Repository<
         }
       });
 
-      const result = this._wrap(this._record(merged));
+      const result = this._wrap(mergedObj);
       this._emit("update", { id: rawPk, data: { ...data } });
       return result;
     });

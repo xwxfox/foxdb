@@ -3,11 +3,11 @@
  * Builds parameterized SQL for aggregate queries.
  */
 
-import type { TObject } from "typebox";
+import type { TObject, TSchema } from "typebox";
 import type { AggregateOptions } from "./types.ts";
 import { buildWhere } from "./query-builder.ts";
 
-export function buildAggregateSql<T extends TObject>(
+export function buildAggregateSql<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
   opts: AggregateOptions<T>,
   softDeleteColumn?: string
