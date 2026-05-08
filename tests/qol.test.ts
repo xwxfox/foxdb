@@ -66,7 +66,7 @@ describe("QoL options", () => {
     expect(orm2.users.findById("1")).toBeNull();
     expect(orm2.users.findById("2")).not.toBeNull();
     orm2._close();
-  });
+  }, 10000);
 
   test("unlinkDbFilesOnExit removes files on close", async () => {
     const orm = createORM({

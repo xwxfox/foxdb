@@ -18,7 +18,7 @@ function makeORM() {
   });
 }
 
-test("direct nested object eq filter returns matching rows", () => {
+test("flattened dotted path eq filter returns matching rows", () => {
   const orm = makeORM();
   orm.nested.insert({
     id: 1,
@@ -32,7 +32,7 @@ test("direct nested object eq filter returns matching rows", () => {
   });
 
   const results = orm.nested.findMany({
-    where: { pricing: { eq: { total: 100, currency: "DKK" } } },
+    where: { AND: [{ "pricing.total": { eq: 100 } }, { "pricing.currency": { eq: "DKK" } }] },
   });
 
   expect(results).toHaveLength(1);
@@ -40,7 +40,7 @@ test("direct nested object eq filter returns matching rows", () => {
   orm._close();
 });
 
-test("direct nested object ne filter returns non-matching rows", () => {
+test("flattened dotted path ne filter returns non-matching rows", () => {
   const orm = makeORM();
   orm.nested.insert({
     id: 1,
@@ -54,7 +54,7 @@ test("direct nested object ne filter returns non-matching rows", () => {
   });
 
   const results = orm.nested.findMany({
-    where: { pricing: { ne: { total: 100, currency: "DKK" } } },
+    where: { OR: [{ "pricing.total": { ne: 100 } }, { "pricing.currency": { ne: "DKK" } }] },
   });
 
   expect(results).toHaveLength(1);

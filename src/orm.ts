@@ -46,6 +46,8 @@ export interface CreateORMBaseOptions {
   mmapSize?: number;
   autoVacuum?: "incremental" | "full" | false;
   vacuumIntervalMs?: number;
+  /** disable fsync during large initial loads */
+  bulkLoadMode?: boolean;
 }
 
 /**
@@ -198,6 +200,8 @@ export type foxdb<
   _close(): void;
   /** read-only metadata */
   _meta: MetaAccessors;
+  /** toggle bulk-load mode (disables synchronous fsync) */
+  _setBulkLoadMode(enabled: boolean): void;
   /** resolve relations for a single record */
   _materialize<Owner extends keyof Tables & string>(
     ownerTable: Owner,
@@ -247,7 +251,7 @@ export function createORM<
     const repos = new Map<string, Repository<any, any, any, any>>();
 
     for (const [name, config] of tableEntries) {
-      const meta = introspectTable(name, config.schema);
+      const meta = introspectTable(name, config.schema, config.generated);
       const colNames = new Set(meta.columns.map((c) => c.name));
 
       // Validate primaryKey
@@ -819,6 +823,11 @@ export function createORM<
       },
     };
 
+    // Bulk-load mode
+    if (opts.bulkLoadMode) {
+      db.setSynchronous("OFF");
+    }
+
     // Build context
     ctx = {
       orm: accessors,
@@ -886,6 +895,9 @@ export function createORM<
     Object.assign(accessors, {
       _transaction: db.transaction.bind(db),
       _close: close,
+      _setBulkLoadMode(enabled: boolean): void {
+        db.setSynchronous(enabled ? "OFF" : "NORMAL");
+      },
       _meta: metaAccessors,
       _materialize: materialize,
       _materializeMany: materializeMany,

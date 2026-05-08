@@ -15,17 +15,28 @@ import type {
   FindOptions,
   InsertData,
   UpdateData,
+  UpdateWhereOptions,
   UpsertOptions,
+  UpsertManyOptions,
   PageResult,
   WhereClause,
+  OrderByClause,
   TableConfig,
   Entity,
   ProjectedEntity,
   TableOperation,
   BroadOperation,
+  AggregateOptions,
   AggregateResult,
   AggregationOp,
+  WindowQueryOptions,
+  WindowResult,
+  Cursor,
+  CursorInput,
+  CursorPageResult,
   QueryMetrics,
+  SelectableKeys,
+  SelectShape,
 } from "./types.ts";
 import type { BunDatabase, SQLQueryBindings } from "./database.ts";
 import { QueryExecutor } from "./query-executor.ts";
@@ -36,6 +47,7 @@ import {
   buildCreateTableSQL,
   buildIndexSQL,
   flattenRow,
+  flattenPatch,
   flattenSubRows,
   hydrateRow,
   type TableMeta,
@@ -49,11 +61,15 @@ import {
   buildInsert,
   buildInsertMany,
   buildUpsert,
+  buildUpsertMany,
   buildUpdate,
+  buildUpdateWhere,
   buildDelete,
   buildWhere,
+  resolveOrderByColumn,
 } from "./query-builder.ts";
 import { buildAggregateSql } from "./aggregate.ts";
+import { buildWindowSql } from "./window.ts";
 import { BatchWriter, type BatchWriterOptions } from "./batch-writer.ts";
 import { resolveTimestampNames } from "./timestamps.ts";
 import type { TimestampConfig } from "./timestamps.ts";
@@ -125,7 +141,7 @@ export class Repository<
     this.descriptor = config;
     this.db = db;
     this._executor = new QueryExecutor({ db, tableName: this.tableName });
-    this.meta = introspectTable(tableName, config.schema);
+    this.meta = introspectTable(tableName, config.schema, config.generated);
     this._timestampNames = resolveTimestampNames(config.timestamps, this.meta);
     this.validator = Compile(config.schema);
 
@@ -161,6 +177,100 @@ export class Repository<
       return { ...opts, select: [...opts.select, pk] };
     }
     return opts;
+  }
+
+  /**
+   * Two-phase row fetch: first get PKs via index, then fetch full rows.
+   * Avoids reading all columns for rows that don't match the WHERE clause.
+   */
+  private _fetchRows(
+    opts: FindOptions<T>,
+    operation: string
+  ): Record<string, unknown>[] {
+    const pk = this.descriptor.primaryKey.name;
+    const softDeleteCol = this.descriptor.softDelete?.column;
+
+    // Two-phase is beneficial when:
+    // 1. User didn't specify an explicit select (wants full objects)
+    // 2. There IS a where clause (filtering is happening)
+    // Falls back to single-phase if phase-1 returns >500 rows (SQLite param limit safety).
+    const canTwoPhase =
+      !opts.select &&
+      opts.where &&
+      Object.keys(opts.where).length > 0;
+
+    if (!canTwoPhase) {
+      const { sql, params } = buildSelect(
+        this.tableName,
+        opts,
+        softDeleteCol,
+        this.meta
+      );
+      return this._executor.all<Record<string, unknown>>(
+        sql,
+        params as SQLQueryBindings[],
+        operation
+      );
+    }
+
+    // Phase 1: fetch only PKs (covers index-only scans)
+    const pkOpts: FindOptions<T> = {
+      ...opts,
+      select: [pk] as any,
+      include: undefined,
+    };
+    const { sql: pkSql, params: pkParams } = buildSelect(
+      this.tableName,
+      pkOpts,
+      softDeleteCol,
+      this.meta
+    );
+    const pkRows = this._executor.all<Record<string, unknown>>(
+      pkSql,
+      pkParams as SQLQueryBindings[],
+      operation
+    );
+    const pkValues = pkRows
+      .map((r: Record<string, unknown>) => r[pk])
+      .filter((v: unknown): v is string | number => typeof v === "string" || typeof v === "number");
+
+    if (pkValues.length === 0) return [];
+
+    // SQLite host parameter limit is 999; fallback if we exceed a safe threshold
+    if (pkValues.length > 500) {
+      const { sql, params } = buildSelect(
+        this.tableName,
+        opts,
+        softDeleteCol,
+        this.meta
+      );
+      return this._executor.all<Record<string, unknown>>(
+        sql,
+        params as SQLQueryBindings[],
+        operation
+      );
+    }
+
+    // Phase 2: fetch full rows for the matching PKs
+    const ph = pkValues.map(() => "?").join(", ");
+    const fullSql = `SELECT * FROM "${this.tableName}" WHERE "${pk}" IN (${ph})`;
+    const rows = this._executor.all<Record<string, unknown>>(
+      fullSql,
+      pkValues as SQLQueryBindings[],
+      operation
+    );
+
+    // Preserve the ordering from phase 1 (orderBy / limit / offset already applied there)
+    const pkOrder = new Map(pkValues.map((v, i) => [v, i]));
+    rows.sort((a, b) => {
+      const av = a[pk];
+      const bv = b[pk];
+      const ai = pkOrder.get(av as string | number) ?? 0;
+      const bi = pkOrder.get(bv as string | number) ?? 0;
+      return ai - bi;
+    });
+
+    return rows;
   }
 
   /** Inject materializers after ORM two-pass init */
@@ -552,6 +662,90 @@ export class Repository<
     });
   }
 
+  /**
+   * Bulk upsert with conflict resolution.
+   * Sub-table rows are reconciled by deleting old rows and re-inserting.
+   *
+   * @group Writing
+   *
+   * @example
+   * ```ts
+   * orm.users.upsertMany({
+   *   data: [
+   *     { id: "u1", name: "alice" },
+   *     { id: "u2", name: "bob" },
+   *   ],
+   *   conflictTarget: "id",
+   * });
+   * ```
+   */
+  upsertMany(opts: UpsertManyOptions<T, PK>): number {
+    return withTrace("repository.upsertMany", { table: this.tableName }, () => {
+      const parsed = opts.data.map((r) => this.parse(r));
+      const objs = parsed.map((p) => {
+        const obj = this._record(p);
+        const now = Date.now();
+        if (this._timestampNames.createdAt) obj[this._timestampNames.createdAt] = now;
+        if (this._timestampNames.updatedAt) obj[this._timestampNames.updatedAt] = now;
+        return obj;
+      });
+      const flatRows = objs.map((obj) => flattenRow(obj, this.meta, this._codecs));
+
+      const conflictCols: string[] = (
+        globalThis.Array.isArray(opts.conflictTarget)
+          ? opts.conflictTarget
+          : [opts.conflictTarget]
+      );
+
+      const allCols = Object.keys(flatRows[0] ?? {});
+      const updateCols: string[] =
+        opts.update ??
+        allCols.filter((c) => !conflictCols.includes(c));
+
+      // Reactivate soft-deleted rows on conflict
+      if (this.descriptor.softDelete && !updateCols.includes(this.descriptor.softDelete.column)) {
+        updateCols.push(this.descriptor.softDelete.column);
+        for (const row of flatRows) {
+          row[this.descriptor.softDelete.column] = null;
+        }
+      }
+
+      let totalChanges = 0;
+      this.db.transaction(() => {
+        const batches = buildUpsertMany(this.tableName, flatRows, conflictCols, updateCols);
+        for (const { sql, params } of batches) {
+          const result = this._executor.exec(sql, params as SQLQueryBindings[], "upsertMany");
+          totalChanges += result.changes;
+        }
+
+        // Re-sync sub-tables: delete old rows, re-insert
+        for (const obj of objs) {
+          const pkVal = obj[this.descriptor.primaryKey.name];
+          for (const sub of this.meta.subTables) {
+            this._executor.exec(
+              `DELETE FROM "${sub.tableName}" WHERE "_owner_id" = ?`,
+              [pkVal as string | number],
+              "delete"
+            );
+            const items = obj[sub.fieldName];
+            if (!globalThis.Array.isArray(items) || items.length === 0) continue;
+            const rows = flattenSubRows(this._assertPk(pkVal), items, sub, this._codecs);
+            for (const row of rows) {
+              const { sql: iSql, params: iParams } = buildInsert(sub.tableName, row);
+              this._executor.exec(iSql, iParams as SQLQueryBindings[], "insert");
+            }
+          }
+        }
+      });
+
+      if (this.descriptor.eviction) {
+        this._runEviction();
+      }
+      this._emit("upsertMany", { data: objs, result: totalChanges });
+      return totalChanges;
+    });
+  }
+
   // ─── Find by PK ────────────────────────────────────────────────────────────
 
   /**
@@ -621,35 +815,39 @@ export class Repository<
    * const orders = orm.orders.findMany({ include: ["lineItems"] });
    * ```
    */
-  findMany<const S extends readonly ScalarKeys<T>[], const I extends readonly SubTableKeys<T>[]>(opts: FindOptions<T> & { select: S; include: I }): (Pick<Infer<T>, S[number]> & TS & { [K in I[number]]: SubTableItem<T, K>[] })[];
-  findMany<const S extends readonly ScalarKeys<T>[]>(opts: FindOptions<T> & { select: S }): (Pick<Infer<T>, S[number]> & TS)[];
+  findMany<const S extends readonly SelectableKeys<T>[], const I extends readonly SubTableKeys<T>[]>(opts: FindOptions<T> & { select: S; include: I }): (SelectShape<T, S> & TS & { [K in I[number]]: SubTableItem<T, K>[] })[];
+  findMany<const S extends readonly SelectableKeys<T>[]>(opts: FindOptions<T> & { select: S }): (SelectShape<T, S> & TS)[];
   findMany(opts?: FindOptions<T>): Entity<Infer<T>, Mat, TS>[];
-  findMany(opts: FindOptions<T> = {}): (Entity<Infer<T>, Mat, TS> | Pick<Infer<T>, ScalarKeys<T>> & TS)[] {
+  findMany(opts: FindOptions<T> = {}): (Entity<Infer<T>, Mat, TS> | SelectShape<T, [ScalarKeys<T>]> & TS)[] {
     return withTrace("repository.findMany", { table: this.tableName }, () => {
       const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk({ ...opts, select: opts.select }) : opts;
-      const { sql, params } = buildSelect(this.tableName, resolvedOpts, this.descriptor.softDelete?.column);
-      const rows = this._executor.all<Record<string, unknown>>(
-        sql,
-        params as SQLQueryBindings[],
-        "findMany"
-      );
+      const rows = this._fetchRows(resolvedOpts, "findMany");
 
-      // Probabilistic LRU touch
+
+      // Probabilistic LRU touch — batched into a single UPDATE
       if (this.descriptor.eviction?.lruColumn) {
         const lruCol = this.descriptor.eviction.lruColumn;
         const pk = this.descriptor.primaryKey.name;
+        const touchPks: (string | number)[] = [];
         for (const row of rows) {
           if (Math.random() < 0.1) {
             const pkVal = row[pk];
-            Promise.resolve().then(() => {
-              try {
-                this._executor.exec(
-                  `UPDATE "${this.tableName}" SET "${lruCol}" = ? WHERE "${pk}" = ?`,
-                  [Date.now(), pkVal as string | number | bigint | null]
-                );
-              } catch { /* ignore */ }
-            });
+            if (typeof pkVal === "string" || typeof pkVal === "number") {
+              touchPks.push(pkVal);
+            }
           }
+        }
+        if (touchPks.length > 0) {
+          const now = Date.now();
+          const ph = touchPks.map(() => "?").join(", ");
+          Promise.resolve().then(() => {
+            try {
+              this._executor.exec(
+                `UPDATE "${this.tableName}" SET "${lruCol}" = ? WHERE "${pk}" IN (${ph})`,
+                [now, ...touchPks] as SQLQueryBindings[]
+              );
+            } catch { /* ignore */ }
+          });
         }
       }
 
@@ -712,20 +910,20 @@ export class Repository<
    * // page.limit, page.offset - what you passed in
    * ```
    */
-  findPage<const S extends readonly ScalarKeys<T>[], const I extends readonly SubTableKeys<T>[]>(opts: FindOptions<T> & { select: S; include: I }): PageResult<Pick<Infer<T>, S[number]> & TS & { [K in I[number]]: SubTableItem<T, K>[] }>;
-  findPage<const S extends readonly ScalarKeys<T>[]>(opts: FindOptions<T> & { select: S }): PageResult<Pick<Infer<T>, S[number]> & TS>;
+  findPage<const S extends readonly SelectableKeys<T>[], const I extends readonly SubTableKeys<T>[]>(opts: FindOptions<T> & { select: S; include: I }): PageResult<SelectShape<T, S> & TS & { [K in I[number]]: SubTableItem<T, K>[] }>;
+  findPage<const S extends readonly SelectableKeys<T>[]>(opts: FindOptions<T> & { select: S }): PageResult<SelectShape<T, S> & TS>;
   findPage(opts?: FindOptions<T>): PageResult<Entity<Infer<T>, Mat, TS>>;
-  findPage(opts: FindOptions<T> = {}): PageResult<Entity<Infer<T>, Mat, TS> | Pick<Infer<T>, ScalarKeys<T>> & TS> {
+  findPage(opts: FindOptions<T> = {}): PageResult<Entity<Infer<T>, Mat, TS> | SelectShape<T, [ScalarKeys<T>]> & TS> {
     return withTrace("repository.findPage", { table: this.tableName }, () => {
       const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts;
-      const { sql, params, countSql, countParams } = buildSelect(
+      const { countSql, countParams } = buildSelect(
         this.tableName,
         resolvedOpts,
-        this.descriptor.softDelete?.column
+        this.descriptor.softDelete?.column,
+        this.meta
       );
 
-      const rows = this._executor
-        .all<Record<string, unknown>>(sql, params as SQLQueryBindings[], "findPage")
+      const rows = this._fetchRows(resolvedOpts, "findPage")
         .map((r) => this._wrap(this._hydrateOne(r, opts.include, opts.select)));
 
       const countRow = this._executor.get<{ _count: number }>(
@@ -747,6 +945,94 @@ export class Repository<
   }
 
   /**
+   * Cursor-based pagination (seek method). Avoids OFFSET degradation on
+   * large tables by using a boundary value from the previous page.
+   *
+   * @group Reading
+   *
+   * @example
+   * ```ts
+   * const page = orm.orders.findCursorPage({
+   *   orderBy: { column: "DocumentDate", direction: "DESC" },
+   *   limit: 25,
+   * });
+   *
+   * const next = orm.orders.findCursorPage({
+   *   orderBy: { column: "DocumentDate", direction: "DESC" },
+   *   cursor: page.nextCursor!,
+   *   limit: 25,
+   * });
+   * ```
+   */
+  findCursorPage(opts: {
+    where?: WhereClause<T>;
+    orderBy: OrderByClause<T>;
+    cursor?: CursorInput;
+    limit?: number;
+  }): CursorPageResult<Entity<Infer<T>, Mat, TS>> {
+    return withTrace("repository.findCursorPage", { table: this.tableName }, () => {
+      const direction = opts.orderBy.direction ?? "ASC";
+      const colRef = resolveOrderByColumn(opts.orderBy.column, this.meta);
+      const limit = opts.limit ?? 25;
+
+      const { sql: whereSql, params: whereParams } = buildWhere(
+        opts.where,
+        this.descriptor.softDelete?.column,
+        this.meta
+      );
+
+      let sql = `SELECT * FROM "${this.tableName}"`;
+      const params: unknown[] = [...whereParams];
+
+      if (opts.cursor) {
+        const cursorCol = resolveOrderByColumn(opts.cursor.column, this.meta);
+        const op = opts.cursor.direction === "next"
+          ? (direction === "ASC" ? ">" : "<")
+          : (direction === "ASC" ? "<" : ">");
+        const cursorCondition = `${cursorCol} ${op} ?`;
+        params.push(opts.cursor.value);
+
+        if (whereSql) {
+          sql += ` ${whereSql} AND ${cursorCondition}`;
+        } else {
+          sql += ` WHERE ${cursorCondition}`;
+        }
+      } else {
+        if (whereSql) sql += ` ${whereSql}`;
+      }
+
+      const queryDirection = opts.cursor?.direction === "prev"
+        ? (direction === "ASC" ? "DESC" : "ASC")
+        : direction;
+
+      sql += ` ORDER BY ${colRef} ${queryDirection} LIMIT ${limit}`;
+
+      const rows = this._executor.all<Record<string, unknown>>(
+        sql,
+        params as SQLQueryBindings[],
+        "findCursorPage"
+      );
+
+      let results = rows.map((r) => this._wrap(this._hydrateOne(r)));
+      if (opts.cursor?.direction === "prev") {
+        results.reverse();
+      }
+
+      const nextCursor: Cursor | null = results.length === limit
+        ? { column: opts.orderBy.column, value: (results[results.length - 1] as Record<string, unknown>)[opts.orderBy.column] }
+        : null;
+
+      const prevCursor: Cursor | null = results.length > 0
+        ? { column: opts.orderBy.column, value: (results[0] as Record<string, unknown>)[opts.orderBy.column] }
+        : null;
+
+      const result = { data: results, nextCursor, prevCursor };
+      this._emit("findCursorPage", { options: opts, result });
+      return result;
+    });
+  }
+
+  /**
    * Find a single record matching the given filters. Equivalent to `findMany`
    * with `limit: 1`, but returns the entity directly (or `null`).
    *
@@ -759,18 +1045,14 @@ export class Repository<
    * });
    * ```
    */
-  findOne<const S extends readonly ScalarKeys<T>[], const I extends readonly SubTableKeys<T>[]>(opts: FindOptions<T> & { select: S; include: I }): (Pick<Infer<T>, S[number]> & TS & { [K in I[number]]: SubTableItem<T, K>[] }) | null;
-  findOne<const S extends readonly ScalarKeys<T>[]>(opts: FindOptions<T> & { select: S }): (Pick<Infer<T>, S[number]> & TS) | null;
+  findOne<const S extends readonly SelectableKeys<T>[], const I extends readonly SubTableKeys<T>[]>(opts: FindOptions<T> & { select: S; include: I }): (SelectShape<T, S> & TS & { [K in I[number]]: SubTableItem<T, K>[] }) | null;
+  findOne<const S extends readonly SelectableKeys<T>[]>(opts: FindOptions<T> & { select: S }): (SelectShape<T, S> & TS) | null;
   findOne(opts?: FindOptions<T>): Entity<Infer<T>, Mat, TS> | null;
-  findOne(opts: FindOptions<T> = {}): (Entity<Infer<T>, Mat, TS> | Pick<Infer<T>, ScalarKeys<T>> & TS) | null {
+  findOne(opts: FindOptions<T> = {}): (Entity<Infer<T>, Mat, TS> | SelectShape<T, [ScalarKeys<T>]> & TS) | null {
     return withTrace("repository.findOne", { table: this.tableName }, () => {
       const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts;
-      const { sql, params } = buildSelect(this.tableName, { ...resolvedOpts, limit: 1 }, this.descriptor.softDelete?.column);
-      const row = this._executor.get<Record<string, unknown>>(
-        sql,
-        params as SQLQueryBindings[],
-        "findOne"
-      );
+      const rows = this._fetchRows({ ...resolvedOpts, limit: 1 }, "findOne");
+      const row = rows.length > 0 ? rows[0]! : null;
       const result = row ? this._wrap(this._hydrateOne(row, opts.include, opts.select)) : null;
       this._emit("findOne", { options: opts, result });
       return result;
@@ -779,6 +1061,7 @@ export class Repository<
 
   /**
    * Iterate over records matching the given filters, yielding one row at a time.
+   * Sub-tables are hydrated in windows to keep memory stable.
    *
    * @group Reading
    *
@@ -789,22 +1072,84 @@ export class Repository<
    * }
    * ```
    */
-  iterate<const S extends readonly ScalarKeys<T>[]>(opts: FindOptions<T> & { select: S }): Generator<Pick<Infer<T>, S[number]> & TS>;
+  iterate<const S extends readonly SelectableKeys<T>[], const I extends readonly SubTableKeys<T>[]>(opts: FindOptions<T> & { select: S; include: I }): Generator<SelectShape<T, S> & TS & { [K in I[number]]: SubTableItem<T, K>[] }>;
+  iterate<const I extends readonly SubTableKeys<T>[]>(opts: FindOptions<T> & { include: I }): Generator<Entity<Infer<T>, Mat, TS> & { [K in I[number]]: SubTableItem<T, K>[] }>;
+  iterate<const S extends readonly SelectableKeys<T>[]>(opts: FindOptions<T> & { select: S }): Generator<SelectShape<T, S> & TS>;
   iterate(opts?: FindOptions<T>): Generator<Entity<Infer<T>, Mat, TS>>;
-  *iterate(opts: FindOptions<T> = {}): Generator<Entity<Infer<T>, Mat, TS> | Pick<Infer<T>, ScalarKeys<T>> & TS> {
-    if (opts.include && opts.include.length > 0) {
-      raise("ITERATE_INCLUDE_UNSUPPORTED", `foxdb: iterate() does not support include. Use findMany() with include instead.`, { table: this.tableName });
-    }
+  *iterate(opts: FindOptions<T> = {}): Generator<Entity<Infer<T>, Mat, TS> | SelectShape<T, [ScalarKeys<T>]> & TS> {
     enterTrace("repository.iterate", { table: this.tableName });
     try {
-      const resolvedOpts = opts.select ? this._ensureSelectPk(opts) : opts;
-      const { sql, params } = buildSelectSql(this.tableName, resolvedOpts, this.descriptor.softDelete?.column);
+      const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts.select ? this._ensureSelectPk(opts) : opts;
+      const { sql, params } = buildSelectSql(this.tableName, resolvedOpts, this.descriptor.softDelete?.column, this.meta);
       const gen = this._executor.iterate<Record<string, unknown>>(sql, params as SQLQueryBindings[], "iterate");
+
+      if (!opts.include || opts.include.length === 0) {
+        for (const row of gen) {
+          yield this._wrap(this._hydrateOne(row, undefined, opts.select));
+        }
+        return;
+      }
+
+      const pk = this.descriptor.primaryKey.name;
+      const windowSize = 100;
+      let buffer: Record<string, unknown>[] = [];
+
       for (const row of gen) {
-        yield this._wrap(this._hydrateOne(row, undefined, opts.select));
+        buffer.push(row);
+        if (buffer.length >= windowSize) {
+          yield* this._hydrateWindow(buffer, opts.include, opts.select);
+          buffer = [];
+        }
+      }
+
+      if (buffer.length > 0) {
+        yield* this._hydrateWindow(buffer, opts.include, opts.select);
       }
     } finally {
       leaveTrace();
+    }
+  }
+
+  private *_hydrateWindow(
+    rows: Record<string, unknown>[],
+    include: string[],
+    select?: string[]
+  ): Generator<Entity<Infer<T>, Mat, TS>> {
+    const pk = this.descriptor.primaryKey.name;
+    const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+
+    const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+    for (const sub of this.meta.subTables) {
+      const included = include.some((name) => name === sub.fieldName);
+      if (!included) continue;
+      if (pkValues.length === 0) continue;
+      const ph = pkValues.map(() => "?").join(", ");
+      const subRows = this._executor.all<Record<string, unknown>>(
+        `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+        pkValues as SQLQueryBindings[],
+        "iterate"
+      );
+      const byOwner = new Map<string | number, Record<string, unknown>[]>();
+      for (const r of subRows) {
+        const owner = r._owner_id;
+        if (typeof owner !== "string" && typeof owner !== "number") continue;
+        if (!byOwner.has(owner)) byOwner.set(owner, []);
+        byOwner.get(owner)!.push(r);
+      }
+      prefetchedBySub.set(sub.tableName, byOwner);
+    }
+
+    for (const row of rows) {
+      const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+      for (const sub of this.meta.subTables) {
+        const included = include.some((name) => name === sub.fieldName);
+        if (!included) continue;
+        const byOwner = prefetchedBySub.get(sub.tableName);
+        const key = row[pk];
+        const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+        rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+      }
+      yield this._wrap(this._hydrateOne(row, include, select, rowPrefetched));
     }
   }
 
@@ -854,7 +1199,7 @@ export class Repository<
    */
   count(where?: WhereClause<T>): number {
     return withTrace("repository.count", { table: this.tableName }, () => {
-      const { sql, params } = buildWhere(where, this.descriptor.softDelete?.column);
+      const { sql, params } = buildWhere(where, this.descriptor.softDelete?.column, this.meta);
       const fullSql = `SELECT COUNT(*) as "_count" FROM "${this.tableName}" ${sql}`.trim();
       const row = this._executor.get<{ _count: number }>(
         fullSql,
@@ -887,14 +1232,45 @@ export class Repository<
    */
   aggregate<
     const A extends Record<string, AggregationOp<T>>,
-    const G extends readonly ScalarKeys<T>[] | undefined = undefined
+    const G extends readonly (ScalarKeys<T> | import("./types.ts").ScalarJsonPath<T>)[] | undefined = undefined
   >(
-    opts: { where?: WhereClause<T>; groupBy?: G; aggregations: A; includeDeleted?: boolean }
-  ): AggregateResult<A, G> {
+    opts: AggregateOptions<T, A> & { groupBy?: G }
+  ): AggregateResult<T, A, G> {
     return withTrace("repository.aggregate", { table: this.tableName }, () => {
-      const { sql, params } = buildAggregateSql(this.tableName, opts, this.descriptor.softDelete?.column);
-      const rows = this._executor.all<AggregateResult<A, G>[number]>(sql, params as SQLQueryBindings[], "aggregate");
+      const { sql, params } = buildAggregateSql(this.tableName, opts, this.descriptor.softDelete?.column, this.meta);
+      const rows = this._executor.all<AggregateResult<T, A, G>[number]>(sql, params as SQLQueryBindings[], "aggregate");
       this._emit("aggregate", { options: opts, result: rows });
+      return rows;
+    });
+  }
+
+  /**
+   * Run window function queries (rowNumber, rank, denseRank, lead, lag)
+   * with partitioning and ordering.
+   *
+   * @group Reading
+   *
+   * @example
+   * ```ts
+   * orm.orders.windowQuery({
+   *   partitionBy: ["Status__Group"],
+   *   orderBy: [{ column: "DocumentDate", direction: "DESC" }],
+   *   select: {
+   *     rowNumber: { rowNumber: true },
+   *     rank: { rank: true },
+   *     leadTotal: { lead: "TotalTurnover", offset: 1 },
+   *   },
+   *   limit: 100,
+   * });
+   * ```
+   */
+  windowQuery<const W extends Record<string, import("./types.ts").WindowFunction<T>>>(
+    opts: WindowQueryOptions<T> & { select: W }
+  ): WindowResult<T, W> {
+    return withTrace("repository.windowQuery", { table: this.tableName }, () => {
+      const { sql, params } = buildWindowSql(this.tableName, opts, this.descriptor.softDelete?.column, this.meta);
+      const rows = this._executor.all<WindowResult<T, W>[number]>(sql, params as SQLQueryBindings[], "windowQuery");
+      this._emit("windowQuery", { options: opts, result: rows });
       return rows;
     });
   }
@@ -966,6 +1342,42 @@ export class Repository<
     });
   }
 
+  /**
+   * Update multiple records matching the given filters.
+   * Returns the number of rows changed.
+   *
+   * @group Writing
+   *
+   * @example
+   * ```ts
+   * orm.users.updateWhere({
+   *   where: { status: { eq: "pending" } },
+   *   data: { status: { group: "completed" } },
+   * });
+   * ```
+   */
+  updateWhere(opts: UpdateWhereOptions<T, PK>): number {
+    return withTrace("repository.updateWhere", { table: this.tableName }, () => {
+      const obj = this._record(opts.data as Infer<T>);
+      const patch = flattenPatch(obj, this.meta, this._codecs);
+      if (this._timestampNames.updatedAt && this._timestampNames.updatedAt in patch === false) {
+        patch[this._timestampNames.updatedAt] = Date.now();
+      }
+
+      const softDeleteCol = opts.includeDeleted ? undefined : this.descriptor.softDelete?.column;
+      const { sql, params } = buildUpdateWhere(
+        this.tableName,
+        patch,
+        opts.where,
+        softDeleteCol,
+        this.meta
+      );
+      const result = this._executor.exec(sql, params as SQLQueryBindings[], "updateWhere");
+      this._emit("updateWhere", { where: opts.where, result: result.changes });
+      return result.changes;
+    });
+  }
+
   // ─── Delete ────────────────────────────────────────────────────────────────
 
   /**
@@ -1029,14 +1441,14 @@ export class Repository<
 
       if (this.descriptor.softDelete) {
         const col = this.descriptor.softDelete.column;
-        const { sql: whereSql, params } = buildWhere(where, col);
+        const { sql: whereSql, params } = buildWhere(where, col, this.meta);
         const fullSql = `UPDATE "${this.tableName}" SET "${col}" = ? ${whereSql}`.trim();
         const changes = this._executor.exec(fullSql, [Date.now(), ...params] as SQLQueryBindings[], "deleteWhere").changes;
         this._emit("deleteWhere", { where, result: changes });
         return changes;
       }
 
-      const { sql: whereSql, params } = buildWhere(where);
+      const { sql: whereSql, params } = buildWhere(where, undefined, this.meta);
 
       const changes = this.db.transaction(() => {
         // Cascade to sub-tables first
@@ -1112,12 +1524,24 @@ export class Repository<
         continue;
       }
 
+      const subMeta: TableMeta = {
+        tableName: sub.tableName,
+        columns: sub.columns,
+        subTables: [],
+        columnByName: sub.columnByName,
+        columnByPath: sub.columnByPath,
+      };
+
       if (prefetched && prefetched.has(sub.tableName)) {
         const rows = prefetched.get(sub.tableName)!;
         const cleaned = rows.map((r) => {
-          const { _id, _owner_id, _index, ...rest } = r;
-          void _id; void _owner_id; void _index;
-          return rest;
+          const rest: Record<string, unknown> = {};
+          for (const key of Object.keys(r)) {
+            if (key !== "_id" && key !== "_owner_id" && key !== "_index") {
+              rest[key] = r[key];
+            }
+          }
+          return hydrateRow(rest, subMeta, new Map(), this._codecs);
         });
         subRows.set(sub.tableName, cleaned);
         continue;
@@ -1130,9 +1554,13 @@ export class Repository<
       );
 
       const cleaned = rows.map((r) => {
-        const { _id, _owner_id, _index, ...rest } = r;
-        void _id; void _owner_id; void _index;
-        return rest;
+        const rest: Record<string, unknown> = {};
+        for (const key of Object.keys(r)) {
+          if (key !== "_id" && key !== "_owner_id" && key !== "_index") {
+            rest[key] = r[key];
+          }
+        }
+        return hydrateRow(rest, subMeta, new Map(), this._codecs);
       });
 
       subRows.set(sub.tableName, cleaned);

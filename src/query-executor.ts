@@ -11,11 +11,20 @@ export class QueryExecutor {
   private db: BunDatabase;
   private tableName: string;
   private metricsHook?: (meta: QueryMetrics) => void;
+  private stmtCache = new Map<string, ReturnType<BunDatabase["prepare"]>>();
 
   constructor(opts: QueryExecutorOptions) {
     this.db = opts.db;
     this.tableName = opts.tableName;
     this.metricsHook = opts.metricsHook;
+  }
+
+  private _getStmt(sql: string) {
+    const cached = this.stmtCache.get(sql);
+    if (cached) return cached;
+    const stmt = this.db.prepare(sql);
+    this.stmtCache.set(sql, stmt);
+    return stmt;
   }
 
   exec(
@@ -24,21 +33,21 @@ export class QueryExecutor {
     operation = "raw"
   ): { changes: number; lastInsertRowid: number | bigint } {
     const start = performance.now();
-    const result = this.db.prepare(sql).run(...(params ?? []));
+    const result = this._getStmt(sql).run(...(params ?? []));
     this._emit(operation, sql, performance.now() - start, result.changes);
     return result;
   }
 
   all<T>(sql: string, params?: SQLQueryBindings[], operation = "read"): T[] {
     const start = performance.now();
-    const rows = this.db.prepare(sql).all(...(params ?? [])) as T[];
+    const rows = this._getStmt(sql).all(...(params ?? [])) as T[];
     this._emit(operation, sql, performance.now() - start, rows.length);
     return rows;
   }
 
   get<T>(sql: string, params?: SQLQueryBindings[], operation = "read"): T | null {
     const start = performance.now();
-    const row = this.db.prepare(sql).get(...(params ?? [])) as T | undefined;
+    const row = this._getStmt(sql).get(...(params ?? [])) as T | undefined;
     this._emit(operation, sql, performance.now() - start, row ? 1 : 0);
     return row ?? null;
   }
@@ -49,8 +58,7 @@ export class QueryExecutor {
     operation = "read"
   ): Generator<T> {
     const start = performance.now();
-    const iter = this.db
-      .prepare(sql)
+    const iter = this._getStmt(sql)
       .iterate(...(params ?? [])) as IterableIterator<T>;
     let count = 0;
     for (const row of iter) {

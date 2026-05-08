@@ -86,8 +86,8 @@ test("nested objects and object arrays still produce expected columns", () => {
     tags: Type.Array(Type.String()),
   });
 
-  const cols = buildColumns(schema.properties);
-  const metadataCol = cols.find(c => c.name === "metadata");
+  const cols = buildColumns(schema.properties, [], 0, true);
+  const metadataCol = cols.find(c => c.name === "metadata__createdAt");
   const tagsCol = cols.find(c => c.name === "tags");
   expect(metadataCol).toBeDefined();
   expect(metadataCol?.sqlType).toBe("TEXT");
@@ -98,7 +98,7 @@ test("nested objects and object arrays still produce expected columns", () => {
   expect(lineItemsCol).toBeUndefined();
 
   const meta = introspectTable("test", schema);
-  const metaMetadataCol = meta.columns.find(c => c.name === "metadata");
+  const metaMetadataCol = meta.columns.find(c => c.name === "metadata__createdAt");
   const metaTagsCol = meta.columns.find(c => c.name === "tags");
   expect(metaMetadataCol).toBeDefined();
   expect(metaMetadataCol?.sqlType).toBe("TEXT");

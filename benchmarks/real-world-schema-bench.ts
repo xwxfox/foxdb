@@ -6,13 +6,16 @@ const WARMUP_MS = 500;
 const MAX_TEST_MS = 10000;
 const PROGRESSION_FACTOR = 2;
 
-function makeORM() {
+function makeORM(indexed = false) {
   return createORM({
     // path: ":memory:",
     path: "./bench.db",
     rebuildOnLaunch: true,
     tables: {
-      sales: table(SaleSchema, (s) => ({ primaryKey: s.OrderNumber })),
+      sales: table(SaleSchema, (s) => ({
+        primaryKey: s.OrderNumber,
+        indexes: indexed ? [{ columns: [s.Status__Group] }] : [],
+      })),
     },
   });
 }
@@ -296,13 +299,39 @@ await runBenchmark("FINDMANY paginated throughput", (count) => {
   orm._close();
 });
 
-// Benchmark 5: JSON path query
-await runBenchmark("JSON PATH query throughput", (count) => {
+// Benchmark 5: Flattened column query (no index)
+await runBenchmark("Flattened column query (no index)", (count) => {
   const orm = makeORM();
   for (let i = 0; i < count; i++) orm.sales.insert(makeSale(i));
   const t0 = performance.now();
   for (let i = 0; i < Math.min(count, 100); i++) {
     orm.sales.findMany({ where: { "Status.Group": { eq: "PNP" } } });
+  }
+  const dt = performance.now() - t0;
+  console.log(`  [inner] ${Math.min(count, 100)} flattened queries in ${Math.round(dt)}ms = ${Math.round(Math.min(count, 100) / (dt / 1000))} ops/sec`);
+  orm._close();
+});
+
+// Benchmark 5b: Flattened column query (with index)
+await runBenchmark("Flattened column query (with index)", (count) => {
+  const orm = makeORM(true);
+  for (let i = 0; i < count; i++) orm.sales.insert(makeSale(i));
+  const t0 = performance.now();
+  for (let i = 0; i < Math.min(count, 100); i++) {
+    orm.sales.findMany({ where: { "Status.Group": { eq: "PNP" } } });
+  }
+  const dt = performance.now() - t0;
+  console.log(`  [inner] ${Math.min(count, 100)} indexed flattened queries in ${Math.round(dt)}ms = ${Math.round(Math.min(count, 100) / (dt / 1000))} ops/sec`);
+  orm._close();
+});
+
+// Benchmark 5c: True JSON path query (depth-2, always JSON_EXTRACT)
+await runBenchmark("True JSON path query throughput", (count) => {
+  const orm = makeORM();
+  for (let i = 0; i < count; i++) orm.sales.insert(makeSale(i));
+  const t0 = performance.now();
+  for (let i = 0; i < Math.min(count, 100); i++) {
+    orm.sales.findMany({ where: { "CustomerInfo.CustomerAddress.Country": { eq: "DK" } } });
   }
   const dt = performance.now() - t0;
   console.log(`  [inner] ${Math.min(count, 100)} JSON path queries in ${Math.round(dt)}ms = ${Math.round(Math.min(count, 100) / (dt / 1000))} ops/sec`);

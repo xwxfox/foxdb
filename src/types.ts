@@ -18,6 +18,31 @@ import type { TypedRelation } from "./typed-relation.ts";
 /** @internal */
 export type UnwrapOptional<T> = T extends TOptional<infer U> ? U : T;
 
+// ─── Select-shape helpers ────────────────────────────────────────────────────
+
+/** @internal */
+export type UnionToIntersection<U> = (U extends any ? (x: U) => void : never) extends (x: infer I) => void ? I : never;
+
+/** @internal */
+export type IsOptionalKey<O, K extends keyof O> = {} extends Pick<O, K> ? true : false;
+
+/** @internal */
+export type MergePath<O, P extends string> = P extends `${infer K}.${infer Rest}`
+  ? K extends keyof O
+    ? IsOptionalKey<O, K> extends true
+      ? { [k in K]?: MergePath<NonNullable<O[K]>, Rest> }
+      : { [k in K]: MergePath<NonNullable<O[K]>, Rest> }
+    : never
+  : P extends keyof O
+    ? IsOptionalKey<O, P> extends true
+      ? { [k in P]?: O[P] }
+      : { [k in P]: O[P] }
+    : never;
+
+/** @internal */
+export type SelectShape<T extends TSchema & { properties: Record<string, TSchema> }, S extends readonly string[]> =
+  UnionToIntersection<S[number] extends infer P ? P extends string ? MergePath<Infer<T>, P> : never : never>;
+
 // ─── Primitive column types ──────────────────────────────────────────────────
 
 /**
@@ -33,7 +58,7 @@ export type SqliteScalar = string | number | boolean | null | bigint;
  * @category Advanced
  */
 export type ScalarProperties<P extends TProperties> = {
-  [K in keyof P as P[K] extends TArray<infer _> ? never : K]: P[K];
+  [K in keyof P as P[K] extends TArray<infer _> ? never : P[K] extends TObject ? never : K]: P[K];
 };
 
 /**
@@ -52,6 +77,18 @@ export type ArrayOfObjectProperties<P extends TProperties> = {
  */
 export type ScalarKeys<T extends TSchema & { properties: Record<string, TSchema> }> =
   keyof ScalarProperties<T["properties"]> & string;
+
+/** @internal */
+export type ObjectKeys<T extends TSchema & { properties: Record<string, TSchema> }> = {
+  [K in keyof T["properties"] & string]: UnwrapOptional<T["properties"][K]> extends TObject ? K : never;
+}[keyof T["properties"] & string];
+
+/** @internal */
+export type PrimitiveArrayKeys<T extends TSchema & { properties: Record<string, TSchema> }> = {
+  [K in keyof T["properties"] & string]: UnwrapOptional<T["properties"][K]> extends TArray<infer Item>
+    ? Item extends TScalarSchema ? K : never
+    : never;
+}[keyof T["properties"] & string];
 
 /**
  * @internal
@@ -99,7 +136,59 @@ export type JsonPathLevel2<T extends TSchema & { properties: Record<string, TSch
 }[keyof T["properties"] & string];
 
 /** @internal */
-export type JsonPath<T extends TSchema & { properties: Record<string, TSchema> }> = JsonPathLevel1<T> | JsonPathLevel2<T>;
+export type JsonPathLevel3<T extends TSchema & { properties: Record<string, TSchema> }> = {
+  [K in keyof T["properties"] & string]: UnwrapOptional<T["properties"][K]> extends { properties: Record<string, TSchema> }
+    ? {
+        [K2 in keyof UnwrapOptional<T["properties"][K]>["properties"] & string]: UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]> extends { properties: Record<string, TSchema> }
+          ? {
+              [K3 in keyof UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"] & string]: UnwrapOptional<UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"][K3]> extends { properties: Record<string, TSchema> }
+                ? `${K}.${K2}.${K3}.${keyof UnwrapOptional<UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"][K3]>["properties"] & string}`
+                : never
+            }[keyof UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"] & string]
+          : never
+      }[keyof UnwrapOptional<T["properties"][K]>["properties"] & string]
+    : never;
+}[keyof T["properties"] & string];
+
+/** @internal */
+export type JsonPath<T extends TSchema & { properties: Record<string, TSchema> }> = JsonPathLevel1<T> | JsonPathLevel2<T> | JsonPathLevel3<T>;
+
+/** @internal */
+export type ScalarJsonPathLevel1<T extends TSchema & { properties: Record<string, TSchema> }> = {
+  [K in keyof T["properties"] & string]: UnwrapOptional<T["properties"][K]> extends TObject<infer P>
+    ? { [K2 in keyof P & string]: UnwrapOptional<P[K2]> extends TScalarSchema ? `${K}.${K2}` : never }[keyof P & string]
+    : never;
+}[keyof T["properties"] & string];
+
+/** @internal */
+export type ScalarJsonPathLevel2<T extends TSchema & { properties: Record<string, TSchema> }> = {
+  [K in keyof T["properties"] & string]: UnwrapOptional<T["properties"][K]> extends TObject<infer P>
+    ? {
+        [K2 in keyof P & string]: UnwrapOptional<P[K2]> extends TObject<infer P2>
+          ? { [K3 in keyof P2 & string]: UnwrapOptional<P2[K3]> extends TScalarSchema ? `${K}.${K2}.${K3}` : never }[keyof P2 & string]
+          : never
+      }[keyof P & string]
+    : never;
+}[keyof T["properties"] & string];
+
+/** @internal */
+export type ScalarJsonPathLevel3<T extends TSchema & { properties: Record<string, TSchema> }> = {
+  [K in keyof T["properties"] & string]: UnwrapOptional<T["properties"][K]> extends TObject<infer P>
+    ? {
+        [K2 in keyof P & string]: UnwrapOptional<P[K2]> extends TObject<infer P2>
+          ? {
+              [K3 in keyof P2 & string]: UnwrapOptional<P2[K3]> extends TObject<infer P3>
+                ? { [K4 in keyof P3 & string]: UnwrapOptional<P3[K4]> extends TScalarSchema ? `${K}.${K2}.${K3}.${K4}` : never }[keyof P3 & string]
+                : never
+            }[keyof P2 & string]
+          : never
+      }[keyof P & string]
+    : never;
+}[keyof T["properties"] & string];
+
+/** @internal */
+export type ScalarJsonPath<T extends TSchema & { properties: Record<string, TSchema> }> =
+  ScalarJsonPathLevel1<T> | ScalarJsonPathLevel2<T> | ScalarJsonPathLevel3<T>;
 
 /** @internal */
 export type PathValue<T extends TSchema & { properties: Record<string, TSchema> }, P extends string> =
@@ -107,14 +196,22 @@ export type PathValue<T extends TSchema & { properties: Record<string, TSchema> 
   ? UnwrapOptional<T["properties"][K]> extends { properties: Record<string, TSchema> }
     ? Rest extends `${infer K2}.${infer Rest2}`
       ? UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]> extends { properties: Record<string, TSchema> }
-        ? UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"][Rest2] extends TSchema
-          ? Static<UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"][Rest2]>
-          : never
+        ? Rest2 extends `${infer K3}.${infer Rest3}`
+          ? UnwrapOptional<UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"][K3]> extends { properties: Record<string, TSchema> }
+            ? UnwrapOptional<UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"][K3]>["properties"][Rest3] extends TSchema
+              ? Static<UnwrapOptional<UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"][K3]>["properties"][Rest3]>
+              : never
+            : never
+          : UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"][Rest2] extends TSchema
+            ? Static<UnwrapOptional<UnwrapOptional<T["properties"][K]>["properties"][K2]>["properties"][Rest2]>
+            : never
         : never
       : UnwrapOptional<T["properties"][K]>["properties"][Rest] extends TSchema
       ? Static<UnwrapOptional<T["properties"][K]>["properties"][Rest]>
       : never
     : never
+  : P extends keyof T["properties"]
+  ? Static<T["properties"][P]>
   : never;
 
 // ─── Static inference shortcuts ──────────────────────────────────────────────
@@ -160,7 +257,21 @@ export type SubTableItemKeys<
 // ─── Filter / Where types ─────────────────────────────────────────────────────
 
 /** @category Query Types */
-export type ScalarFilter<V> = V extends string
+export type ScalarFilter<V> = unknown extends V
+  ?
+  | { eq: V }
+  | { ne: V }
+  | { gt: V }
+  | { gte: V }
+  | { lt: V }
+  | { lte: V }
+  | { like: string }
+  | { between: [V, V] }
+  | { in: V[] }
+  | { notIn: V[] }
+  | { isNull: true }
+  | { isNotNull: true }
+  : V extends string
   ?
   | { eq: V }
   | { ne: V }
@@ -210,11 +321,16 @@ export type ScalarFilter<V> = V extends string
 export type WhereClause<T extends TSchema & { properties: Record<string, TSchema> }> = {
   [K in ScalarKeys<T>]?: ScalarFilter<Static<T["properties"][K]>>;
 } & {
+  [K in ObjectKeys<T>]?: ScalarFilter<Static<T["properties"][K]>>;
+} & {
   [K in JsonPath<T>]?: ScalarFilter<PathValue<T, K>>;
 } & {
   AND?: WhereClause<T>[];
   OR?: WhereClause<T>[];
   NOT?: WhereClause<T>;
+  _raw?: { sql: string; params: unknown[] };
+} & {
+  [key: string]: ScalarFilter<unknown> | WhereClause<T>[] | { sql: string; params: unknown[] } | undefined;
 };
 
 // ─── OrderBy ─────────────────────────────────────────────────────────────────
@@ -224,7 +340,7 @@ export type WhereClause<T extends TSchema & { properties: Record<string, TSchema
  * @category Query Types
  */
 export type OrderByClause<T extends TSchema & { properties: Record<string, TSchema> }> = {
-  column: ScalarKeys<T>;
+  column: ScalarKeys<T> | ScalarJsonPath<T>;
   direction?: "ASC" | "DESC";
 };
 
@@ -237,6 +353,21 @@ export type OrderByClause<T extends TSchema & { properties: Record<string, TSche
 export interface PaginationOptions {
   limit?: number;
   offset?: number;
+}
+
+export interface Cursor {
+  column: string;
+  value: unknown;
+}
+
+export interface CursorInput extends Cursor {
+  direction: "next" | "prev";
+}
+
+export interface CursorPageResult<T> {
+  data: T[];
+  nextCursor: Cursor | null;
+  prevCursor: Cursor | null;
 }
 
 // ─── Query options ────────────────────────────────────────────────────────────
@@ -267,12 +398,18 @@ export interface PaginationOptions {
  * @category Query Types
  * @category Query Types
  */
+/** @internal */
+export type SelectableKeys<T extends TSchema & { properties: Record<string, TSchema> }> =
+  ScalarKeys<T> | ObjectKeys<T> | PrimitiveArrayKeys<T> | JsonPath<T>;
+
 export interface FindOptions<T extends TSchema & { properties: Record<string, TSchema> }> extends PaginationOptions {
   where?: WhereClause<T>;
   orderBy?: OrderByClause<T> | OrderByClause<T>[];
   include?: SubTableKeys<T>[];
-  select?: ScalarKeys<T>[];
+  select?: SelectableKeys<T>[];
   includeDeleted?: boolean;
+  distinct?: boolean;
+  distinctOn?: (ScalarKeys<T> | ScalarJsonPath<T>)[];
 }
 
 // ─── Insert / Update ──────────────────────────────────────────────────────────
@@ -301,10 +438,10 @@ export type UpdateData<T extends TSchema & { properties: Record<string, TSchema>
  */
 export interface IndexDefinition {
   name?: string;
-  columns: ColumnRef<string, TScalarSchema>[];
+  columns: Array<ColumnRef<string, TScalarSchema> | { name: string }>;
   unique?: boolean;
   where?: string;
-  include?: ColumnRef<string, TScalarSchema>[];
+  include?: Array<ColumnRef<string, TScalarSchema> | { name: string }>;
 }
 
 // ─── Timestamp types ─────────────────────────────────────────────────────────
@@ -380,6 +517,12 @@ export interface SoftDeleteConfig {
   column: string;
 }
 
+export interface GeneratedColumn {
+  name: string;
+  expr: string;
+  sqlType?: import("./schema.ts").SqliteType;
+}
+
 export interface TableConfig<
   T extends TSchema & { properties: Record<string, TSchema> } = TSchema & { properties: Record<string, TSchema> },
   PK extends string = string,
@@ -393,6 +536,7 @@ export interface TableConfig<
   eviction?: EvictionConfig;
   compression?: CompressionConfig;
   softDelete?: SoftDeleteConfig;
+  generated?: GeneratedColumn[];
 }
 
 // ─── Meta accessors ──────────────────────────────────────────────────────────
@@ -619,6 +763,37 @@ export interface UpsertOptions<T extends TSchema & { properties: Record<string, 
   update?: Array<ScalarKeys<T>>;
 }
 
+// ─── UpdateWhere ──────────────────────────────────────────────────────────────
+
+/**
+ * bulk conditional update
+ * @category Query Types
+ */
+export interface UpdateWhereOptions<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  PK extends ScalarKeys<T>
+> {
+  where: WhereClause<T>;
+  data: Partial<Omit<Infer<T>, PK>>;
+  includeDeleted?: boolean;
+}
+
+// ─── UpsertMany ───────────────────────────────────────────────────────────────
+
+/**
+ * bulk upsert with conflict resolution
+ * @category Query Types
+ */
+export interface UpsertManyOptions<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  PK extends ScalarKeys<T>
+> {
+  data: InsertData<T>[];
+  conflictTarget: PK | PK[];
+  /** columns to update on conflict - defaults to all non-pk columns */
+  update?: Array<ScalarKeys<T>>;
+}
+
 // ─── Migration types ──────────────────────────────────────────────────────────
 
 /**
@@ -680,15 +855,52 @@ export type SyncPolicy =
   | "auto"
   | ((diff: SchemaDiff, db: import("./database.ts").BunDatabase) => boolean | void);
 
+// ─── Window Functions ─────────────────────────────────────────────────────────
+
+/** @category Query Types */
+export type WindowFunction<T extends TSchema & { properties: Record<string, TSchema> }> =
+  | { rowNumber: true }
+  | { rank: true }
+  | { denseRank: true }
+  | { lead: ScalarKeys<T> | ScalarJsonPath<T>; offset?: number }
+  | { lag: ScalarKeys<T> | ScalarJsonPath<T>; offset?: number };
+
+/** @category Query Types */
+export interface WindowQueryOptions<
+  T extends TSchema & { properties: Record<string, TSchema> }
+> {
+  partitionBy?: (ScalarKeys<T> | ScalarJsonPath<T>)[];
+  orderBy?: OrderByClause<T> | OrderByClause<T>[];
+  where?: WhereClause<T>;
+  limit?: number;
+  select: Record<string, WindowFunction<T>>;
+}
+
+/** @internal */
+export type WindowFunctionResult<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  W extends WindowFunction<T>
+> = W extends { lead: infer C extends string }
+  ? PathValue<T, C> | null
+  : W extends { lag: infer C extends string }
+  ? PathValue<T, C> | null
+  : number;
+
+/** @category Query Types */
+export type WindowResult<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  W extends Record<string, WindowFunction<T>>
+> = Array<{ [K in keyof W]: WindowFunctionResult<T, W[K]> }>;
+
 // ─── Aggregation ──────────────────────────────────────────────────────────────
 
 /** @category Query Types */
 export type AggregationOp<T extends TSchema & { properties: Record<string, TSchema> } = TSchema & { properties: Record<string, TSchema> }> =
-  | { sum?: ScalarKeys<T> }
-  | { count?: "*" | ScalarKeys<T> }
-  | { avg?: ScalarKeys<T> }
-  | { min?: ScalarKeys<T> }
-  | { max?: ScalarKeys<T> };
+  | { sum?: ScalarKeys<T> | ScalarJsonPath<T> }
+  | { count?: "*" | ScalarKeys<T> | ScalarJsonPath<T> }
+  | { avg?: ScalarKeys<T> | ScalarJsonPath<T> }
+  | { min?: ScalarKeys<T> | ScalarJsonPath<T> }
+  | { max?: ScalarKeys<T> | ScalarJsonPath<T> };
 
 /** @category Query Types */
 export interface AggregateOptions<
@@ -696,16 +908,34 @@ export interface AggregateOptions<
   A extends Record<string, AggregationOp<T>> = Record<string, AggregationOp<T>>
 > {
   where?: WhereClause<T>;
-  groupBy?: readonly ScalarKeys<T>[];
+  groupBy?: readonly (ScalarKeys<T> | ScalarJsonPath<T>)[];
   aggregations: A;
+  having?: { [K in keyof A]?: ScalarFilter<unknown> };
   includeDeleted?: boolean;
 }
 
+/** @internal */
+export type AggregationOpResult<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  Op extends AggregationOp<T>
+> = Op extends { sum: string }
+  ? number | null
+  : Op extends { count: string }
+  ? number
+  : Op extends { avg: string }
+  ? number | null
+  : Op extends { min: infer C extends string }
+  ? PathValue<T, C> | null
+  : Op extends { max: infer C extends string }
+  ? PathValue<T, C> | null
+  : never;
+
 /** @category Query Types */
 export type AggregateResult<
-  A extends Record<string, AggregationOp<any>>,
+  T extends TSchema & { properties: Record<string, TSchema> },
+  A extends Record<string, AggregationOp<T>>,
   G extends readonly string[] | undefined = undefined
-> = Array<{ [K in keyof A]: unknown } & (G extends readonly string[] ? { [K in G[number]]: unknown } : {})>;
+> = Array<{ [K in keyof A]: AggregationOpResult<T, A[K]> } & (G extends readonly string[] ? { [K in G[number]]: PathValue<T, K> } : {})>;
 
 // ─── Query Metrics ────────────────────────────────────────────────────────────
 
@@ -733,17 +963,21 @@ export type TableOperation =
   | "insert"
   | "insertMany"
   | "update"
+  | "updateWhere"
   | "delete"
   | "deleteWhere"
   | "upsert"
+  | "upsertMany"
   | "findById"
   | "findMany"
   | "findOne"
   | "findPage"
+  | "findCursorPage"
   | "iterate"
   | "count"
   | "flush"
-  | "aggregate";
+  | "aggregate"
+  | "windowQuery";
 
 /**
  * broad categories for event listening

@@ -32,18 +32,21 @@ describe("issue 1: select + include implicitly includes PK", () => {
   });
 });
 
-// ─── Issue 2: iterate() with include must throw ───────────────────────────────
+// ─── Issue 2: iterate() with include is now supported ─────────────────────────
 
-describe("issue 2: iterate with include throws", () => {
-  test("iterate() throws when include is provided", () => {
+describe("issue 2: iterate with include works", () => {
+  test("iterate() hydrates sub-tables in windows", () => {
     const orm = createORM({
       tables: { sales: table(SaleSchema, (s) => ({ primaryKey: s.id })) },
     });
-    expect(() => {
-      for (const _ of orm.sales.iterate({ include: ["lineItems"] })) {
-        // should not reach here
-      }
-    }).toThrow();
+    orm.sales.insert({ id: "S1", total: 10, lineItems: [{ sku: "A" }] });
+    orm.sales.insert({ id: "S2", total: 20, lineItems: [{ sku: "B" }] });
+    const results: Array<Record<string, unknown>> = [];
+    for (const row of orm.sales.iterate({ include: ["lineItems"] })) {
+      results.push(row as Record<string, unknown>);
+    }
+    expect(results).toHaveLength(2);
+    expect(results[0]!.lineItems).toHaveLength(1);
     orm._close();
   });
 });

@@ -410,4 +410,33 @@ describe("real-world SaleSchema integration", () => {
 
     orm._close();
   });
+
+  test("select dotted path returns correct nested shape", () => {
+    const orm = makeORM();
+    orm.sales.insert(createFullSale(1));
+
+    const results = orm.sales.findMany({
+      select: ["Status.Group", "Pricing.TotalMargin"],
+    });
+    expect(results).toHaveLength(1);
+    expect(results[0]!.Status).toEqual({ Group: "PNP" });
+    expect(results[0]!.Pricing).toEqual({ TotalMargin: 500 });
+    expect((results[0]! as any).OrderNumber).toBeUndefined();
+
+    orm._close();
+  });
+
+  test("orderBy dotted path sorts correctly", () => {
+    const orm = makeORM();
+    orm.sales.insert(createFullSale(1));
+    orm.sales.insert(createFullSale(2));
+    orm.sales.insert(createFullSale(3));
+
+    const results = orm.sales.findMany({
+      orderBy: { column: "Status.Group", direction: "ASC" },
+    });
+    expect(results.map((r) => r.OrderNumber)).toEqual([1, 2, 3]);
+
+    orm._close();
+  });
 });

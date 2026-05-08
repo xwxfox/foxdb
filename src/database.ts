@@ -141,6 +141,11 @@ export class BunDatabase {
     return stmt as BunStatement;
   }
 
+  /** set synchronous pragma for bulk load or normal operation */
+  setSynchronous(mode: "OFF" | "NORMAL" | "FULL" | "EXTRA"): void {
+    this.db.run(`PRAGMA synchronous = ${mode};`);
+  }
+
   /** clear the statement cache */
   clearCache(): void {
     for (const stmt of this._stmtCache.values()) {

@@ -30,6 +30,7 @@ export interface TableConfigShape<PK extends string, TS extends TimestampConfig>
   eviction?: EvictionConfig;
   compression?: CompressionConfig;
   softDelete?: import("./types.ts").SoftDeleteConfig;
+  generated?: import("./types.ts").GeneratedColumn[];
 }
 
 /**

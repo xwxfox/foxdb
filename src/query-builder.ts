@@ -10,6 +10,7 @@ import type {
   OrderByClause,
   FindOptions,
 } from "./types.ts";
+import type { TableMeta } from "./schema.ts";
 import { raise } from "./errors.ts";
 
 // ─── WHERE builder ────────────────────────────────────────────────────────────
@@ -45,9 +46,29 @@ function escapeSqlString(value: string): string {
  * **Known limitation:** column names containing dots are interpreted as JSON
  * paths, alongside the `AND`/`OR`/`NOT` reservation in `WhereLogic`.
  */
-function resolveJsonColumn(column: string): { sql: string } | null {
+function resolveJsonColumn(column: string, meta?: TableMeta): { sql: string } | null {
   const parts = column.split(".");
   if (parts.length < 2) return null;
+
+  if (meta) {
+    // O(1) lookup for flattened columns
+    const flatCol = meta.columnByPath.get(column);
+    if (flatCol) {
+      return { sql: `"${flatCol.name}"` };
+    }
+
+    // Find longest prefix path that matches a JSON TEXT column
+    for (let i = parts.length - 1; i >= 1; i--) {
+      const prefixPath = parts.slice(0, i).join(".");
+      const remainingPath = parts.slice(i).join(".");
+      const prefixCol = meta.columnByPath.get(prefixPath);
+      if (prefixCol && prefixCol.sqlType === "TEXT") {
+        const safeColumn = prefixCol.name.replace(/"/g, '""');
+        return { sql: `JSON_EXTRACT("${safeColumn}", '$.${escapeSqlString(remainingPath)}')` };
+      }
+    }
+  }
+
   const jsonColumn = parts[0]!;
   const path = parts.slice(1).join(".");
   const safeColumn = jsonColumn.replace(/"/g, '""');
@@ -60,8 +81,8 @@ function paramValue(v: unknown): unknown {
   return v;
 }
 
-function buildFilter(column: string, filter: FilterShape): FilterEntry {
-  const jsonCol = resolveJsonColumn(column);
+export function buildFilter(column: string, filter: FilterShape, meta?: TableMeta): FilterEntry {
+  const jsonCol = resolveJsonColumn(column, meta);
   const colRef = jsonCol ? jsonCol.sql : `"${column}"`;
 
   if ("eq" in filter) return { sql: `${colRef} = ?`, params: [paramValue(filter.eq)] };
@@ -158,7 +179,8 @@ function isTriviallyFalse(where: unknown): boolean {
 
 function buildWhereRecursive<T extends TSchema & { properties: Record<string, TSchema> }>(
   where: WhereClause<T> | undefined,
-  softDeleteColumn?: string
+  softDeleteColumn?: string,
+  meta?: TableMeta
 ): { sql: string; params: unknown[] } {
   const parts: string[] = [];
   const params: unknown[] = [];
@@ -184,7 +206,7 @@ function buildWhereRecursive<T extends TSchema & { properties: Record<string, TS
           if (parts.length === 1) return { sql: "WHERE 1=0", params: [] };
           return { sql: `WHERE ${parts.join(" AND ")}`, params };
         }
-        const child = buildWhereRecursive(clause, undefined);
+        const child = buildWhereRecursive(clause, undefined, meta);
         if (child.sql) {
           parts.push(`(${child.sql.replace(/^WHERE\s+/, "")})`);
           params.push(...child.params);
@@ -201,7 +223,7 @@ function buildWhereRecursive<T extends TSchema & { properties: Record<string, TS
           break;
         }
         if (isTriviallyFalse(clause)) continue;
-        const child = buildWhereRecursive(clause, undefined);
+        const child = buildWhereRecursive(clause, undefined, meta);
         if (child.sql) {
           orParts.push(child.sql.replace(/^WHERE\s+/, ""));
           orParams.push(...child.params);
@@ -219,7 +241,7 @@ function buildWhereRecursive<T extends TSchema & { properties: Record<string, TS
       if (isTriviallyTrue(logic.NOT)) {
         parts.push("1=0");
       } else if (!isTriviallyFalse(logic.NOT)) {
-        const child = buildWhereRecursive(logic.NOT, undefined);
+        const child = buildWhereRecursive(logic.NOT, undefined, meta);
         if (child.sql) {
           parts.push(`NOT (${child.sql.replace(/^WHERE\s+/, "")})`);
           params.push(...child.params);
@@ -228,11 +250,19 @@ function buildWhereRecursive<T extends TSchema & { properties: Record<string, TS
     }
   }
 
+  // Handle raw SQL escape hatch
+  const rawFilter = (where as Record<string, unknown>)._raw;
+  if (rawFilter && typeof rawFilter === "object" && "sql" in rawFilter) {
+    const raw = rawFilter as { sql: string; params?: unknown[] };
+    parts.push(`(${raw.sql})`);
+    params.push(...(raw.params ?? []));
+  }
+
   // Handle column filters
   for (const [col, filter] of Object.entries(where)) {
-    if (col === "AND" || col === "OR" || col === "NOT") continue;
+    if (col === "AND" || col === "OR" || col === "NOT" || col === "_raw") continue;
     if (!isFilterShape(filter)) continue;
-    const entry = buildFilter(col, filter);
+    const entry = buildFilter(col, filter, meta);
     parts.push(entry.sql);
     params.push(...entry.params);
   }
@@ -243,22 +273,45 @@ function buildWhereRecursive<T extends TSchema & { properties: Record<string, TS
 
 export function buildWhere<T extends TSchema & { properties: Record<string, TSchema> }>(
   where: WhereClause<T> | undefined,
-  softDeleteColumn?: string
+  softDeleteColumn?: string,
+  meta?: TableMeta
 ): WhereResult {
-  return buildWhereRecursive(where, softDeleteColumn);
+  return buildWhereRecursive(where, softDeleteColumn, meta);
 }
 
 // ─── ORDER BY builder ─────────────────────────────────────────────────────────
 
+export function resolveOrderByColumn(column: string, meta?: TableMeta): string {
+  if (!meta) return `"${column}"`;
+  const flatCol = meta.columnByPath.get(column);
+  if (flatCol) return `"${flatCol.name}"`;
+
+  // Find longest prefix path that matches a JSON TEXT column
+  const parts = column.split(".");
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const prefixPath = parts.slice(0, i).join(".");
+    const remainingPath = parts.slice(i).join(".");
+    const prefixCol = meta.columnByPath.get(prefixPath);
+    if (prefixCol && prefixCol.sqlType === "TEXT") {
+      const safeColumn = prefixCol.name.replace(/"/g, '""');
+      return `JSON_EXTRACT("${safeColumn}", '$.${escapeSqlString(remainingPath)}')`;
+    }
+  }
+
+  return `"${column}"`;
+}
+
 export function buildOrderBy<T extends TSchema & { properties: Record<string, TSchema> }>(
-  orderBy: FindOptions<T>["orderBy"]
+  orderBy: FindOptions<T>["orderBy"],
+  meta?: TableMeta
 ): string {
   if (!orderBy) return "";
   const clauses: OrderByClause<T>[] = globalThis.Array.isArray(orderBy) ? orderBy : [orderBy];
   if (clauses.length === 0) return "";
-  const parts = clauses.map(
-    (o) => `"${o.column}" ${o.direction ?? "ASC"}`
-  );
+  const parts = clauses.map((o) => {
+    const colRef = resolveOrderByColumn(o.column, meta);
+    return `${colRef} ${o.direction ?? "ASC"}`;
+  });
   return `ORDER BY ${parts.join(", ")}`;
 }
 
@@ -290,27 +343,86 @@ export interface SelectResult {
   countParams: unknown[];
 }
 
+function resolveSelectColumn(column: string, meta: TableMeta): string[] {
+  // 1. Exact match on a real column (scalar, flattened, or JSON TEXT)
+  const exact = meta.columnByName.get(column) || meta.columnByPath.get(column);
+  if (exact) return [`"${exact.name}"`];
+
+  // 2. Top-level object name (e.g. "Status") → select all its flattened children
+  const children: string[] = [];
+  for (const col of meta.columns) {
+    if (col.path && col.path[0] === column) children.push(`"${col.name}"`);
+  }
+  if (children.length > 0) return children;
+
+  // 3. Dotted path deeper than flattened depth → JSON_EXTRACT with __ alias
+  const parts = column.split(".");
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const prefix = parts.slice(0, i).join(".");
+    const suffix = parts.slice(i).join(".");
+    const prefixCol = meta.columnByPath.get(prefix);
+    if (prefixCol && prefixCol.sqlType === "TEXT") {
+      const alias = parts.join("__");
+      return [
+        `JSON_EXTRACT("${prefixCol.name}", '$.${suffix.replace(/'/g, "''")}') as "${alias}"`,
+      ];
+    }
+  }
+
+  // Fallback
+  return [`"${column}"`];
+}
+
 export function buildSelectSql<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
   opts: FindOptions<T>,
-  softDeleteColumn?: string
+  softDeleteColumn?: string,
+  meta?: TableMeta
 ): SelectResult {
   const { sql: whereSql, params: whereParams } = buildWhere(
     opts.where,
-    opts.includeDeleted ? undefined : softDeleteColumn
+    opts.includeDeleted ? undefined : softDeleteColumn,
+    meta
   );
-  const orderSql = buildOrderBy(opts.orderBy);
+  const orderSql = buildOrderBy(opts.orderBy, meta);
   const { sql: limitSql, params: limitParams } = buildLimitOffset(
     opts.limit,
     opts.offset
   );
 
-  const selectCols = opts.select
-    ? opts.select.map((c) => `"${c}"`).join(", ")
+  const selectCols = opts.select && meta
+    ? opts.select.flatMap((c) => resolveSelectColumn(c, meta)).join(", ")
     : "*";
 
+  if (opts.distinctOn && opts.distinctOn.length > 0) {
+    const groupCols = opts.distinctOn.map((c) => resolveOrderByColumn(c, meta)).join(", ");
+    const clauses = [
+      `SELECT ${selectCols} FROM "${tableName}"`,
+      whereSql,
+      `GROUP BY ${groupCols}`,
+      orderSql,
+      limitSql,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const countClauses = [
+      `SELECT COUNT(*) as "_count" FROM (SELECT 1 FROM "${tableName}"`,
+      whereSql,
+      `GROUP BY ${groupCols})`,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return {
+      sql: clauses,
+      params: [...whereParams, ...limitParams],
+      countSql: countClauses,
+      countParams: whereParams,
+    };
+  }
+
+  const distinctPrefix = opts.distinct ? "DISTINCT " : "";
   const clauses = [
-    `SELECT ${selectCols} FROM "${tableName}"`,
+    `SELECT ${distinctPrefix}${selectCols} FROM "${tableName}"`,
     whereSql,
     orderSql,
     limitSql,
@@ -318,17 +430,24 @@ export function buildSelectSql<T extends TSchema & { properties: Record<string, 
     .filter(Boolean)
     .join(" ");
 
-  const countClauses = [
-    `SELECT COUNT(*) as "_count" FROM "${tableName}"`,
-    whereSql,
-  ]
-    .filter(Boolean)
-    .join(" ");
+  let countClauses: string[];
+  if (opts.distinct) {
+    countClauses = [
+      `SELECT COUNT(*) as "_count" FROM (SELECT DISTINCT ${selectCols} FROM "${tableName}"`,
+      whereSql,
+      `)`,
+    ];
+  } else {
+    countClauses = [
+      `SELECT COUNT(*) as "_count" FROM "${tableName}"`,
+      whereSql,
+    ];
+  }
 
   return {
     sql: clauses,
     params: [...whereParams, ...limitParams],
-    countSql: countClauses,
+    countSql: countClauses.filter(Boolean).join(" "),
     countParams: whereParams,
   };
 }
@@ -336,9 +455,10 @@ export function buildSelectSql<T extends TSchema & { properties: Record<string, 
 export function buildSelect<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
   opts: FindOptions<T>,
-  softDeleteColumn?: string
+  softDeleteColumn?: string,
+  meta?: TableMeta
 ): SelectResult {
-  return buildSelectSql(tableName, opts, softDeleteColumn);
+  return buildSelectSql(tableName, opts, softDeleteColumn, meta);
 }
 
 // ─── INSERT builder ───────────────────────────────────────────────────────────
@@ -405,6 +525,42 @@ export function buildUpsert(
   };
 }
 
+export function buildUpsertMany(
+  tableName: string,
+  rows: Record<string, unknown>[],
+  conflictCols: string[],
+  updateCols: string[],
+  maxParams = 999
+): Array<{ sql: string; params: unknown[] }> {
+  if (rows.length === 0) return [];
+  const first = rows[0]!;
+  const keys = Object.keys(first);
+  const colCount = keys.length;
+  const maxRowsPerStmt = Math.floor(maxParams / colCount);
+  if (maxRowsPerStmt <= 0) {
+    raise("TOO_MANY_COLUMNS", `foxdb: table "${tableName}" has too many columns for multi-value upsert`);
+  }
+  const conflict = conflictCols.map((c) => `"${c}"`).join(", ");
+  const updates = updateCols
+    .map((c) => `"${c}" = excluded."${c}"`)
+    .join(", ");
+  const batches: Array<{ sql: string; params: unknown[] }> = [];
+  for (let i = 0; i < rows.length; i += maxRowsPerStmt) {
+    const batch = rows.slice(i, i + maxRowsPerStmt);
+    const cols = keys.map((k) => `"${k}"`).join(", ");
+    const valueGroups = batch.map(() => {
+      const ph = keys.map(() => "?").join(", ");
+      return `(${ph})`;
+    }).join(", ");
+    const params = batch.flatMap((row) => keys.map((k) => row[k]));
+    batches.push({
+      sql: `INSERT INTO "${tableName}" (${cols}) VALUES ${valueGroups} ON CONFLICT (${conflict}) DO UPDATE SET ${updates}`,
+      params,
+    });
+  }
+  return batches;
+}
+
 // ─── UPDATE builder ───────────────────────────────────────────────────────────
 
 export function buildUpdate<T extends TSchema & { properties: Record<string, TSchema> }>(
@@ -424,13 +580,33 @@ export function buildUpdate<T extends TSchema & { properties: Record<string, TSc
   };
 }
 
+export function buildUpdateWhere<T extends TSchema & { properties: Record<string, TSchema> }>(
+  tableName: string,
+  patch: Record<string, unknown>,
+  where: WhereClause<T>,
+  softDeleteColumn?: string,
+  meta?: TableMeta
+): { sql: string; params: unknown[] } {
+  const entries = Object.entries(patch);
+  if (entries.length === 0) {
+    raise("NO_COLUMNS_TO_UPDATE", "foxdb: no columns to update", { table: tableName });
+  }
+  const sets = entries.map(([k]) => `"${k}" = ?`).join(", ");
+  const { sql: whereSql, params: whereParams } = buildWhere(where, softDeleteColumn, meta);
+  return {
+    sql: `UPDATE "${tableName}" SET ${sets} ${whereSql}`.trim(),
+    params: [...entries.map(([, v]) => v), ...whereParams],
+  };
+}
+
 // ─── DELETE builder ───────────────────────────────────────────────────────────
 
 export function buildDelete<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
-  where: WhereClause<T>
+  where: WhereClause<T>,
+  meta?: TableMeta
 ): { sql: string; params: unknown[] } {
-  const { sql: whereSql, params } = buildWhere(where);
+  const { sql: whereSql, params } = buildWhere(where, undefined, meta);
   return {
     sql: `DELETE FROM "${tableName}" ${whereSql}`.trim(),
     params,
