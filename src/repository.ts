@@ -233,7 +233,7 @@ export class Repository<
     // Phase 1: fetch only PKs (covers index-only scans)
     const pkOpts: FindOptions<TQuery> = {
       ...opts,
-      select: [pk] as any,
+      select: [pk] as [PK],
       include: undefined,
     };
     const { sql: pkSql, params: pkParams } = buildSelect(
@@ -1318,7 +1318,7 @@ export class Repository<
       }
 
       // Fetch existing, merge, validate - use raw find to avoid spurious read events
-      const existing = this._findByIdRaw(this._assertPk(rawPk) as unknown as Infer<TQuery>[PK]);
+      const existing = this._findByIdRaw(this._assertPk(rawPk) as Infer<TQuery>[PK]);
       if (!existing) return null;
 
       const merged = this.parse({ ...existing, ...data });

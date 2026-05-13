@@ -148,3 +148,41 @@ try {
 ```
 
 Configure the global error policy to `throw`, `emit`, `emit-swallow`, or `crash`.
+
+## Generated Columns
+
+Define computed columns that are calculated from SQL expressions. These columns are automatically populated by SQLite and cannot be written to directly:
+
+```typescript
+import { Object, String, Number, Type } from "typebox";
+
+const OrderSchema = Object({
+  id: String(),
+  amount: Number(),
+});
+
+const orm = createORM({
+  tables: {
+    orders: table(OrderSchema, (s) => ({
+      primaryKey: s.id,
+      generated: {
+        doubleAmount: { expr: "amount * 2", type: Type.Number() },
+      },
+    })),
+  },
+});
+
+// Insert only writes to writable columns
+orm.orders.insert({ id: "o1", amount: 100 });
+
+// Query returns the generated column
+const order = orm.orders.findById("o1");
+console.log(order.doubleAmount); // 200
+
+// Generated columns are also queryable
+const rows = orm.orders.findMany({
+  where: { doubleAmount: { gte: 150 } },
+});
+```
+
+Generated columns work with full type inference - the TypeBox type determines both the TypeScript type and the SQLite column type.

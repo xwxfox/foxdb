@@ -327,7 +327,7 @@ The auto-generated API docs are organized into categories so you can find what y
 |----------|---------------|
 | **Setup** | `createORM`, `foxdb`, `CreateORMOptions` |
 | **Repositories** | `Repository` class and all CRUD methods |
-| **Schema** | `table`, `TableDescriptor`, `ColumnRef`, `IndexDefinition` |
+| **Schema** | `table`, `TableDescriptor`, `ColumnRef`, `IndexDefinition`, `GeneratedColumnConfig` |
 | **Query Types** | `FindOptions`, `WhereClause`, `PageResult`, `Entity` |
 | **Relations** | `RelationBuilder`, `TypedRelation`, `Materialized` |
 | **Events** | `EventBus`, `ORMEvents`, `TableEventPayload` |

@@ -493,7 +493,7 @@ export function createORM<
               if (!rel) return undefined;
               const targetRepo = repos.get(rel.targetTable);
               if (!targetRepo) return null;
-              const fkVal = record[rel.ownerField] as unknown as string | number | bigint | null;
+              const fkVal = record[rel.ownerField] as string | number | bigint | null;
               if (fkVal == null) return null;
               const found = targetRepo.raw(
                 `SELECT * FROM "${rel.targetTable}" WHERE "${rel.targetField}" = ? LIMIT 1`,
