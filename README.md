@@ -77,7 +77,7 @@ orm._close();
 
 ### schemas
 
-use [typebox](https://github.com/sinclairzx81/typebox) to define your data shape. foxdb supports all scalar types (`String`, `Number`, `Integer`, `Boolean`, `Literal`) plus arrays of objects (sub-tables).
+use [typebox](https://github.com/sinclairzx81/typebox) to define your data shape. foxdb supports all scalar types (`String`, `Number`, `Integer`, `Boolean`, `Literal`) plus arrays of objects (sub-tables) and arrays of scalars (JSON strings).
 
 ```typescript
 import { Object, String, Number, Integer, Array, Optional } from "typebox";
@@ -93,6 +93,7 @@ const OrderSchema = Object({
   customerId: String(),
   status: String(),
   total: Number(),
+  tags: Array(String()),          // becomes a JSON string column ~
   lineItems: Array(LineItemSchema), // becomes a sub-table ~
 });
 ```

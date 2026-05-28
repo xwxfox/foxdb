@@ -331,6 +331,45 @@ export type ScalarFilter<V> = unknown extends V
   ? { eq: V } | { ne: V } | { isNull: true } | { isNotNull: true }
   : { isNull: true } | { isNotNull: true };
 
+/** @category Query Types */
+export type ArrayFilter<V> = {
+  /** matches if at least one element in the array equals this value */
+  arraySome?: V;
+  /** matches if no element in the array equals this value */
+  arrayNot?: V;
+  /** matches if the array is empty (length 0 or NULL) */
+  isEmpty?: boolean;
+  /** 
+   * HIGH PERFORMANCE: matches if at least one element in the array equals this value.
+   * Uses string-based matching which is significantly faster than JSON parsing but 
+   * sensitive to JSON formatting/whitespace.
+   */
+  fastArraySome?: V;
+  /** 
+   * HIGH PERFORMANCE: matches if no element in the array equals this value.
+   * Uses string-based matching which is significantly faster than JSON parsing but 
+   * sensitive to JSON formatting/whitespace.
+   */
+  fastArrayNot?: V;
+  /** 
+   * HIGH PERFORMANCE: matches if the array is empty ('[]' or NULL).
+   * Significantly faster than isEmpty and can be indexed with a standard index.
+   */
+  fastArrayIsEmpty?: boolean;
+  /** matches if the entire array equals this value */
+  eq?: V[];
+  /** matches if the entire array does not equal this value */
+  ne?: V[];
+  /** matches if the column is NULL */
+  isNull?: true;
+  /** matches if the column is NOT NULL */
+  isNotNull?: true;
+  /** matches if the entire array is in the list of arrays */
+  in?: V[][];
+  /** matches if the entire array is not in the list of arrays */
+  notIn?: V[][];
+};
+
 /**
  * Where filters for queries - only scalar columns are filterable.
  *
@@ -339,6 +378,10 @@ export type ScalarFilter<V> = unknown extends V
  * // String filters
  * orm.users.findMany({ where: { name: { like: "%alice%" } } });
  * orm.users.findMany({ where: { email: { in: ["a@x.com", "b@x.com"] } } });
+ *
+ * // Array filters
+ * orm.users.findMany({ where: { tags: { arraySome: "typescript" } } });
+ * orm.users.findMany({ where: { scores: { isEmpty: true } } });
  *
  * // Number filters
  * orm.users.findMany({ where: { age: { gte: 18, lte: 65 } } });
@@ -358,7 +401,11 @@ export type WhereClause<T extends TSchema & {
 } & {
     [K in ObjectKeys<T>]?: ScalarFilter<Static<T["properties"][K]>>;
   } & {
-    [K in JsonPath<T>]?: ScalarFilter<PathValue<T, K>>;
+    [K in PrimitiveArrayKeys<T>]?: ArrayFilter<Static<UnwrapOptional<T["properties"][K]> extends TArray<infer Item> ? Item : never>>;
+  } & {
+    [K in JsonPath<T>]?: PathValue<T, K> extends Array<infer Item>
+    ? ArrayFilter<Item>
+    : ScalarFilter<PathValue<T, K>>;
   } & {
     AND?: WhereClause<T>[];
     OR?: WhereClause<T>[];

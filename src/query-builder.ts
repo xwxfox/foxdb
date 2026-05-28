@@ -33,7 +33,13 @@ export type FilterShape =
   | { in: readonly unknown[] }
   | { notIn: readonly unknown[] }
   | { isNull: true }
-  | { isNotNull: true };
+  | { isNotNull: true }
+  | { arraySome: unknown }
+  | { arrayNot: unknown }
+  | { isEmpty: boolean }
+  | { fastArraySome: unknown }
+  | { fastArrayNot: unknown }
+  | { fastArrayIsEmpty: boolean };
 
 function isFilterShape(value: unknown): value is FilterShape {
   return typeof value === "object" && value !== null;
@@ -109,6 +115,38 @@ export function buildFilter(column: string, filter: FilterShape, meta?: TableMet
   }
   if ("isNull" in filter) return { sql: `${colRef} IS NULL`, params: [] };
   if ("isNotNull" in filter) return { sql: `${colRef} IS NOT NULL`, params: [] };
+  if ("arraySome" in filter) return { sql: `EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`, params: [paramValue(filter.arraySome)] };
+  if ("arrayNot" in filter) return { sql: `NOT EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`, params: [paramValue(filter.arrayNot)] };
+  if ("isEmpty" in filter) {
+    if (filter.isEmpty) {
+      return { sql: `(json_array_length(${colRef}) = 0 OR ${colRef} IS NULL)`, params: [] };
+    } else {
+      return { sql: `json_array_length(${colRef}) > 0`, params: [] };
+    }
+  }
+  if ("fastArrayIsEmpty" in filter) {
+    if (filter.fastArrayIsEmpty) {
+      return { sql: `(${colRef} = '[]' OR ${colRef} IS NULL)`, params: [] };
+    } else {
+      return { sql: `(${colRef} != '[]' AND ${colRef} IS NOT NULL)`, params: [] };
+    }
+  }
+  if ("fastArraySome" in filter) {
+    const jsonValue = JSON.stringify([filter.fastArraySome]);
+    const inner = jsonValue.substring(1, jsonValue.length - 1); // remove [ ]
+    return { 
+      sql: `(',' || REPLACE(REPLACE(${colRef}, '[', ''), ']', '') || ',') LIKE ?`, 
+      params: [`%,${inner},%`] 
+    };
+  }
+  if ("fastArrayNot" in filter) {
+    const jsonValue = JSON.stringify([filter.fastArrayNot]);
+    const inner = jsonValue.substring(1, jsonValue.length - 1); // remove [ ]
+    return { 
+      sql: `(',' || REPLACE(REPLACE(${colRef}, '[', ''), ']', '') || ',') NOT LIKE ?`, 
+      params: [`%,${inner},%`] 
+    };
+  }
   raise("UNKNOWN_FILTER", `foxdb: unknown filter operator for column "${column}"`, { column });
 }
 

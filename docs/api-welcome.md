@@ -194,6 +194,16 @@ orm.users.deleteWhere({ status: { eq: "banned" } });
 // Null checks
 { deletedAt: { isNull: true } }
 { deletedAt: { isNotNull: true } }
+
+// Array filters (for arrays of primitives)
+{ tags: { arraySome: "typescript" } }
+{ tags: { arrayNot: "javascript" } }
+{ tags: { isEmpty: true } }
+
+// Fast Array filters (High-performance string matching)
+{ tags: { fastArraySome: "typescript" } }
+{ tags: { fastArrayNot: "javascript" } }
+{ tags: { fastArrayIsEmpty: true } }
 ```
 
 ---

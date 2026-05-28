@@ -1,6 +1,6 @@
 {
   "name": "@xwxfox/foxdb",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "description": "itty bitty e2e typed orm for bun :3",
   "main": "dist/index.mjs",
   "publishConfig": {

@@ -44,6 +44,19 @@ const OrderSchema = Object({
 
 When you insert an order, foxdb automatically splits `lineItems` into a child table. When you `findById`, they come back joined. Zero boilerplate.
 
+## Primitive Arrays
+
+Arrays of strings, numbers, or booleans are stored as **JSON strings** in a single column:
+
+```typescript
+const UserSchema = Object({
+  id: String(),
+  tags: Array(String()), // stored as '["a", "b"]'
+});
+```
+
+These are queryable using `arraySome`, `isEmpty`, or the high-performance `fastArraySome` operators.
+
 ## The `table()` Descriptor
 
 `table()` turns a schema into a database table. You declare the primary key, indexes, timestamps, and sub-table configs:
