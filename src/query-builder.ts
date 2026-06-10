@@ -92,62 +92,75 @@ export function buildFilter(column: string, filter: FilterShape, meta?: TableMet
   const jsonCol = resolveJsonColumn(column, meta);
   const colRef = jsonCol ? jsonCol.sql : `"${column}"`;
 
-  if ("eq" in filter) return { sql: `${colRef} = ?`, params: [paramValue(filter.eq)] };
-  if ("ne" in filter) return { sql: `${colRef} != ?`, params: [paramValue(filter.ne)] };
-  if ("gt" in filter) return { sql: `${colRef} > ?`, params: [paramValue(filter.gt)] };
-  if ("gte" in filter) return { sql: `${colRef} >= ?`, params: [paramValue(filter.gte)] };
-  if ("lt" in filter) return { sql: `${colRef} < ?`, params: [paramValue(filter.lt)] };
-  if ("lte" in filter) return { sql: `${colRef} <= ?`, params: [paramValue(filter.lte)] };
-  if ("like" in filter) return { sql: `${colRef} LIKE ?`, params: [paramValue(filter.like)] };
+  const parts: string[] = [];
+  const params: SQLQueryBindings[] = [];
+
+  if ("eq" in filter) { parts.push(`${colRef} = ?`); params.push(paramValue(filter.eq)); }
+  if ("ne" in filter) { parts.push(`${colRef} != ?`); params.push(paramValue(filter.ne)); }
+  if ("gt" in filter) { parts.push(`${colRef} > ?`); params.push(paramValue(filter.gt)); }
+  if ("gte" in filter) { parts.push(`${colRef} >= ?`); params.push(paramValue(filter.gte)); }
+  if ("lt" in filter) { parts.push(`${colRef} < ?`); params.push(paramValue(filter.lt)); }
+  if ("lte" in filter) { parts.push(`${colRef} <= ?`); params.push(paramValue(filter.lte)); }
+  if ("like" in filter) { parts.push(`${colRef} LIKE ?`); params.push(paramValue(filter.like)); }
   if ("between" in filter) {
     const [lo, hi] = filter.between;
-    return { sql: `${colRef} BETWEEN ? AND ?`, params: [paramValue(lo), paramValue(hi)] };
+    parts.push(`${colRef} BETWEEN ? AND ?`);
+    params.push(paramValue(lo), paramValue(hi));
   }
   if ("in" in filter) {
     const vals = filter.in;
     const placeholders = vals.map(() => "?").join(", ");
-    return { sql: `${colRef} IN (${placeholders})`, params: vals.map(paramValue) };
+    parts.push(`${colRef} IN (${placeholders})`);
+    params.push(...vals.map(paramValue));
   }
   if ("notIn" in filter) {
     const vals = filter.notIn;
     const placeholders = vals.map(() => "?").join(", ");
-    return { sql: `${colRef} NOT IN (${placeholders})`, params: vals.map(paramValue) };
+    parts.push(`${colRef} NOT IN (${placeholders})`);
+    params.push(...vals.map(paramValue));
   }
-  if ("isNull" in filter) return { sql: `${colRef} IS NULL`, params: [] };
-  if ("isNotNull" in filter) return { sql: `${colRef} IS NOT NULL`, params: [] };
-  if ("arraySome" in filter) return { sql: `EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`, params: [paramValue(filter.arraySome)] };
-  if ("arrayNot" in filter) return { sql: `NOT EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`, params: [paramValue(filter.arrayNot)] };
+  if ("isNull" in filter) parts.push(`${colRef} IS NULL`);
+  if ("isNotNull" in filter) parts.push(`${colRef} IS NOT NULL`);
+  if ("arraySome" in filter) {
+    parts.push(`EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`);
+    params.push(paramValue(filter.arraySome));
+  }
+  if ("arrayNot" in filter) {
+    parts.push(`NOT EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`);
+    params.push(paramValue(filter.arrayNot));
+  }
   if ("isEmpty" in filter) {
     if (filter.isEmpty) {
-      return { sql: `(json_array_length(${colRef}) = 0 OR ${colRef} IS NULL)`, params: [] };
+      parts.push(`(json_array_length(${colRef}) = 0 OR ${colRef} IS NULL)`);
     } else {
-      return { sql: `json_array_length(${colRef}) > 0`, params: [] };
+      parts.push(`json_array_length(${colRef}) > 0`);
     }
   }
   if ("fastArrayIsEmpty" in filter) {
     if (filter.fastArrayIsEmpty) {
-      return { sql: `(${colRef} = '[]' OR ${colRef} IS NULL)`, params: [] };
+      parts.push(`(${colRef} = '[]' OR ${colRef} IS NULL)`);
     } else {
-      return { sql: `(${colRef} != '[]' AND ${colRef} IS NOT NULL)`, params: [] };
+      parts.push(`(${colRef} != '[]' AND ${colRef} IS NOT NULL)`);
     }
   }
   if ("fastArraySome" in filter) {
     const jsonValue = JSON.stringify([filter.fastArraySome]);
-    const inner = jsonValue.substring(1, jsonValue.length - 1); // remove [ ]
-    return { 
-      sql: `(',' || REPLACE(REPLACE(${colRef}, '[', ''), ']', '') || ',') LIKE ?`, 
-      params: [`%,${inner},%`] 
-    };
+    const inner = jsonValue.substring(1, jsonValue.length - 1);
+    parts.push(`(',' || REPLACE(REPLACE(${colRef}, '[', ''), ']', '') || ',') LIKE ?`);
+    params.push(`%,${inner},%`);
   }
   if ("fastArrayNot" in filter) {
     const jsonValue = JSON.stringify([filter.fastArrayNot]);
-    const inner = jsonValue.substring(1, jsonValue.length - 1); // remove [ ]
-    return { 
-      sql: `(',' || REPLACE(REPLACE(${colRef}, '[', ''), ']', '') || ',') NOT LIKE ?`, 
-      params: [`%,${inner},%`] 
-    };
+    const inner = jsonValue.substring(1, jsonValue.length - 1);
+    parts.push(`(',' || REPLACE(REPLACE(${colRef}, '[', ''), ']', '') || ',') NOT LIKE ?`);
+    params.push(`%,${inner},%`);
   }
-  raise("UNKNOWN_FILTER", `foxdb: unknown filter operator for column "${column}"`, { column });
+
+  if (parts.length === 0) {
+    raise("UNKNOWN_FILTER", `foxdb: unknown filter operator for column "${column}"`, { column });
+  }
+
+  return { sql: parts.join(" AND "), params };
 }
 
 export interface WhereResult {
