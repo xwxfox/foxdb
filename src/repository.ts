@@ -110,6 +110,20 @@ export class Repository<
   /** table metadata - columns, sub-tables, indexes */
   readonly meta: TableMeta;
 
+  /**
+   * Get the underlying SQLite table name for a sub-table by field name.
+   * Returns undefined if the field is not a sub-table (array relationship).
+   *
+   * @example
+   * ```ts
+   * orm.purchases.getSubTableName("PurchaseLineItems")
+   * // => "archivedPurchases__PurchaseLineItems"
+   * ```
+   */
+  getSubTableName(fieldName: string): string | undefined {
+    return this.meta.subTables.find((st) => st.fieldName === fieldName)?.tableName;
+  }
+
   private readonly validator: ReturnType<typeof Compile<TWrite>>;
   private readonly db: BunDatabase;
   private readonly descriptor: TableConfig<

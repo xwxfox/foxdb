@@ -308,7 +308,12 @@ export type ScalarFilter<V> = unknown extends V
   ?
   | { eq: V }
   | { ne: V }
+  | { gt: V }
+  | { gte: V }
+  | { lt: V }
+  | { lte: V }
   | { like: string }
+  | { between: [V, V] }
   | { in: V[] }
   | { notIn: V[] }
   | { isNull: true }
@@ -1032,6 +1037,13 @@ export interface AggregateOptions<
   aggregations: A;
   having?: { [K in keyof A]?: ScalarFilter<unknown> };
   includeDeleted?: boolean;
+  /**
+   * Aggregate over a sub-table (array relationship) instead of the main table.
+   * Provide the field name of the sub-table (e.g. "PurchaseLineItems").
+   * Column references in aggregations/where/groupBy are resolved against the
+   * sub-table's item schema.
+   */
+  subTable?: string;
 }
 
 /** @internal */
