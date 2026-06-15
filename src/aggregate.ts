@@ -13,8 +13,18 @@ function escapeSqlString(value: string): string {
   return value.replace(/'/g, "''");
 }
 
-function resolveAggColumn(column: string, meta?: TableMeta): string {
+function resolveAggColumn(column: string, meta?: TableMeta, subTableField?: string): string {
   if (!meta) return `"${column}"`;
+
+  // If we're querying a sub-table, strip the sub-table field name prefix 
+  // and resolve against the sub-table's column map
+  if (subTableField && column.startsWith(subTableField + ".")) {
+    const stripped = column.slice(subTableField.length + 1);
+    const flatCol = meta.columnByPath.get(stripped);
+    if (flatCol) return `"${flatCol.name}"`;
+    return `"${stripped}"`;
+  }
+
   const flatCol = meta.columnByPath.get(column);
   if (flatCol) return `"${flatCol.name}"`;
 
@@ -57,22 +67,22 @@ export function buildAggregateSql<T extends TSchema & { properties: Record<strin
 
   if (opts.groupBy) {
     for (const col of opts.groupBy) {
-      const resolved = resolveAggColumn(col, effectiveMeta);
+      const resolved = resolveAggColumn(col, effectiveMeta, subMeta?.tableName);
       selectParts.push(`${resolved} as "${col.replace(/"/g, '""')}"`);
     }
   }
 
   for (const [alias, op] of Object.entries(opts.aggregations)) {
-    if ("sum" in op && op.sum) selectParts.push(`SUM(${resolveAggColumn(op.sum, effectiveMeta)}) as "${alias}"`);
+    if ("sum" in op && op.sum) selectParts.push(`SUM(${resolveAggColumn(op.sum, effectiveMeta, subMeta?.tableName)}) as "${alias}"`);
     else if ("count" in op && op.count) {
-      selectParts.push(`COUNT(${op.count === "*" ? "*" : resolveAggColumn(op.count, effectiveMeta)}) as "${alias}"`);
+      selectParts.push(`COUNT(${op.count === "*" ? "*" : resolveAggColumn(op.count, effectiveMeta, subMeta?.tableName)}) as "${alias}"`);
     }
-    else if ("avg" in op && op.avg) selectParts.push(`AVG(${resolveAggColumn(op.avg, effectiveMeta)}) as "${alias}"`);
-    else if ("min" in op && op.min) selectParts.push(`MIN(${resolveAggColumn(op.min, effectiveMeta)}) as "${alias}"`);
-    else if ("max" in op && op.max) selectParts.push(`MAX(${resolveAggColumn(op.max, effectiveMeta)}) as "${alias}"`);
+    else if ("avg" in op && op.avg) selectParts.push(`AVG(${resolveAggColumn(op.avg, effectiveMeta, subMeta?.tableName)}) as "${alias}"`);
+    else if ("min" in op && op.min) selectParts.push(`MIN(${resolveAggColumn(op.min, effectiveMeta, subMeta?.tableName)}) as "${alias}"`);
+    else if ("max" in op && op.max) selectParts.push(`MAX(${resolveAggColumn(op.max, effectiveMeta, subMeta?.tableName)}) as "${alias}"`);
   }
 
-  const groupBySql = opts.groupBy ? `GROUP BY ${opts.groupBy.map(c => resolveAggColumn(c, effectiveMeta)).join(", ")}` : "";
+  const groupBySql = opts.groupBy ? `GROUP BY ${opts.groupBy.map(c => resolveAggColumn(c, effectiveMeta, subMeta?.tableName)).join(", ")}` : "";
 
   const havingParts: string[] = [];
   const havingParams: SQLQueryBindings[] = [];

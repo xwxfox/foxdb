@@ -408,7 +408,7 @@ export type WhereClause<T extends TSchema & {
   } & {
     [K in PrimitiveArrayKeys<T>]?: ArrayFilter<Static<UnwrapOptional<T["properties"][K]> extends TArray<infer Item> ? Item : never>>;
   } & {
-    [K in JsonPath<T>]?: PathValue<T, K> extends Array<infer Item>
+    [K in (JsonPath<T> | SubTableScalarPath<T>)]?: PathValue<T, K> extends Array<infer Item>
     ? ArrayFilter<Item>
     : ScalarFilter<PathValue<T, K>>;
   } & {
@@ -1021,11 +1021,11 @@ export type WindowResult<
 
 /** @category Query Types */
 export type AggregationOp<T extends TSchema & { properties: Record<string, TSchema> } = TSchema & { properties: Record<string, TSchema> }> =
-  | { sum?: ScalarKeys<T> | ScalarJsonPath<T> }
-  | { count?: "*" | ScalarKeys<T> | ScalarJsonPath<T> }
-  | { avg?: ScalarKeys<T> | ScalarJsonPath<T> }
-  | { min?: ScalarKeys<T> | ScalarJsonPath<T> }
-  | { max?: ScalarKeys<T> | ScalarJsonPath<T> };
+  | { sum?: ScalarKeys<T> | ScalarJsonPath<T> | SubTableScalarPath<T> }
+  | { count?: "*" | ScalarKeys<T> | ScalarJsonPath<T> | SubTableScalarPath<T> }
+  | { avg?: ScalarKeys<T> | ScalarJsonPath<T> | SubTableScalarPath<T> }
+  | { min?: ScalarKeys<T> | ScalarJsonPath<T> | SubTableScalarPath<T> }
+  | { max?: ScalarKeys<T> | ScalarJsonPath<T> | SubTableScalarPath<T> };
 
 /** @category Query Types */
 export interface AggregateOptions<
