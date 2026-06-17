@@ -22,7 +22,7 @@ describe("issue 1: select + include implicitly includes PK", () => {
       tables: { sales: table(SaleSchema, (s) => ({ primaryKey: s.id })) },
     });
     orm.sales.insert({ id: "S1", total: 10, lineItems: [{ sku: "A" }] });
-    const rows = orm.sales.findMany({ select: ["total"], include: ["lineItems"] });
+    const rows = orm.sales.O_findMany({ select: ["total"], include: ["lineItems"] });
     expect(rows).toHaveLength(1);
     const first = rows[0]!;
     expect(first.total).toBe(10);
@@ -42,7 +42,7 @@ describe("issue 2: iterate with include works", () => {
     orm.sales.insert({ id: "S1", total: 10, lineItems: [{ sku: "A" }] });
     orm.sales.insert({ id: "S2", total: 20, lineItems: [{ sku: "B" }] });
     const results: Array<Record<string, unknown>> = [];
-    for (const row of orm.sales.iterate({ include: ["lineItems"] })) {
+    for (const row of orm.sales.O_iterate({ include: ["lineItems"] })) {
       results.push(row as Record<string, unknown>);
     }
     expect(results).toHaveLength(2);
@@ -69,10 +69,10 @@ describe("issue 3: batch writer validates and applies codecs/timestamps", () => 
     const writer = orm.logs.createBatchWriter({ maxBuffer: 2 });
     writer.insert({ id: "1", payload: "hello" });
     // Not flushed yet (buffer has 1, maxBuffer is 2)
-    expect(orm.logs.count()).toBe(0);
+    expect(orm.logs.O_count()).toBe(0);
     writer.insert({ id: "2", payload: "world" });
     // Flushed automatically because buffer reached maxBuffer
-    expect(orm.logs.count()).toBe(2);
+    expect(orm.logs.O_count()).toBe(2);
     writer.close();
     const row = orm.logs.findById("1");
     expect(row).not.toBeNull();
@@ -101,7 +101,7 @@ describe("issue 4: aggregate respects soft deletes", () => {
     orm.orders.insert({ id: "3", total: 30 });
     orm.orders.deleteById("2");
 
-    const rows = orm.orders.aggregate({ aggregations: { sumTotal: { sum: "total" } } });
+    const rows = orm.orders.O_aggregate({ aggregations: { sumTotal: { sum: "total" } } });
     expect(rows[0]!.sumTotal).toBe(40); // 10 + 30, not 60
     orm._close();
   });
@@ -119,7 +119,7 @@ describe("issue 4: aggregate respects soft deletes", () => {
     orm.orders.insert({ id: "2", total: 20 });
     orm.orders.deleteById("2");
 
-    const rows = orm.orders.aggregate({ aggregations: { sumTotal: { sum: "total" } }, includeDeleted: true });
+    const rows = orm.orders.O_aggregate({ aggregations: { sumTotal: { sum: "total" } }, includeDeleted: true });
     expect(rows[0]!.sumTotal).toBe(30);
     orm._close();
   });
@@ -170,11 +170,11 @@ describe("issue 6: soft delete does not cascade to sub-tables", () => {
     orm.parents.deleteById("1");
 
     // Parent is soft-deleted
-    expect(orm.parents.findMany()).toHaveLength(0);
-    expect(orm.parents.findMany({ includeDeleted: true })).toHaveLength(1);
+    expect(orm.parents.O_findMany()).toHaveLength(0);
+    expect(orm.parents.O_findMany({ includeDeleted: true })).toHaveLength(1);
 
     // Sub-rows are still there when including deleted
-    const withDeleted = orm.parents.findMany({ includeDeleted: true, include: ["children"] });
+    const withDeleted = orm.parents.O_findMany({ includeDeleted: true, include: ["children"] });
     expect(withDeleted[0]!.children).toHaveLength(1);
     orm._close();
   });

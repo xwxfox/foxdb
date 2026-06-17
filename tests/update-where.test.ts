@@ -51,7 +51,7 @@ describe("repository.updateWhere", () => {
     });
     expect(changed).toBe(2);
 
-    const found = orm.users.findMany({ where: { age: { eq: 99 } } });
+    const found = orm.users.O_findMany({ where: { age: { eq: 99 } } });
     expect(found).toHaveLength(2);
     expect(found.map((u) => u.id).sort()).toEqual(["u2", "u3"]);
   });
@@ -63,7 +63,7 @@ describe("repository.updateWhere", () => {
     });
     expect(changed).toBe(2);
 
-    const admins = orm.users.findMany({ where: { "status.group": { eq: "superadmin" } } });
+    const admins = orm.users.O_findMany({ where: { "status.group": { eq: "superadmin" } } });
     expect(admins).toHaveLength(2);
     expect(admins.map((u) => u.id).sort()).toEqual(["u1", "u4"]);
   });

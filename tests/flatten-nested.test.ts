@@ -63,12 +63,18 @@ describe("nested object flattening", () => {
     expect(colMap.get("pricing__discount__meta")!.nullable).toBe(true);
     expect(colMap.get("pricing__discount__meta")!.path).toEqual(["pricing", "discount", "meta"]);
 
-    // Array of primitives stays JSON
-    expect(colMap.get("tags")!.sqlType).toBe("TEXT");
+    // Array of primitives becomes a scalar sub-table
+    expect(colMap.get("tags")).toBeUndefined();
 
-    // Sub-table for items
-    expect(meta.subTables).toHaveLength(1);
-    expect(meta.subTables[0]!.tableName).toBe("test__items");
+    // Sub-tables for items (object array) and tags (scalar array)
+    expect(meta.subTables).toHaveLength(2);
+    const itemsSub = meta.subTables.find(s => s.fieldName === "items")!;
+    expect(itemsSub.tableName).toBe("test__items");
+    const tagsSub = meta.subTables.find(s => s.fieldName === "tags")!;
+    expect(tagsSub.isScalar).toBe(true);
+    expect(tagsSub.scalarType).toBe("TEXT");
+    expect(tagsSub.columns).toHaveLength(1);
+    expect(tagsSub.columns[0]!.name).toBe("_value");
   });
 
   test("insert roundtrip preserves nested objects", () => {
@@ -138,7 +144,7 @@ describe("nested object flattening", () => {
     expect(whereResult.sql).toBe('WHERE "status__group" = ?');
     expect(whereResult.params).toEqual(["PNP"]);
 
-    const results = orm.test.findMany({
+    const results = orm.test.O_findMany({
       where: { "status.group": { eq: "PNP" } },
     });
     expect(results).toHaveLength(2);
@@ -173,7 +179,7 @@ describe("nested object flattening", () => {
     expect(whereResult.sql).toBe('WHERE "pricing__total" > ?');
     expect(whereResult.params).toEqual([100]);
 
-    const results = orm.test.findMany({
+    const results = orm.test.O_findMany({
       where: { "pricing.total": { gt: 100 } },
     });
     expect(results).toHaveLength(1);
@@ -210,7 +216,7 @@ describe("nested object flattening", () => {
     );
     expect(whereResult.params).toEqual(["web"]);
 
-    const results = orm.test.findMany({
+    const results = orm.test.O_findMany({
       where: { "pricing.discount.meta.source": { eq: "web" } },
     });
     expect(results).toHaveLength(1);
@@ -270,7 +276,7 @@ describe("nested object flattening", () => {
       items: [],
     });
 
-    const results = orm.test.findMany({
+    const results = orm.test.O_findMany({
       where: { "status.group": { eq: "PNP" } },
     });
     expect(results).toHaveLength(2);
@@ -299,7 +305,7 @@ describe("nested object flattening", () => {
       ],
     });
 
-    const results = orm.test.findMany({ include: ["items"] });
+    const results = orm.test.O_findMany({ include: ["items"] });
     expect(results).toHaveLength(1);
     expect(results[0]!.items).toHaveLength(2);
     expect(results[0]!.items[0]!.sku).toBe("X");
@@ -357,7 +363,7 @@ describe("nested object flattening", () => {
       items: [],
     });
 
-    const results = orm.test.findMany({
+    const results = orm.test.O_findMany({
       where: {
         "status.group": { eq: "PNP" },
         "pricing.discount.code": { eq: "SAVE10" },
@@ -379,7 +385,7 @@ describe("nested object flattening", () => {
       items: [],
     });
 
-    const results = orm.test.findMany({
+    const results = orm.test.O_findMany({
       select: ["status.group", "pricing.total"],
     });
     expect(results).toHaveLength(1);
@@ -400,7 +406,7 @@ describe("nested object flattening", () => {
       items: [],
     });
 
-    const results = orm.test.findMany({
+    const results = orm.test.O_findMany({
       select: ["status"],
     });
     expect(results).toHaveLength(1);
@@ -434,7 +440,7 @@ describe("nested object flattening", () => {
       items: [],
     });
 
-    const results = orm.test.findMany({
+    const results = orm.test.O_findMany({
       orderBy: { column: "pricing.total", direction: "ASC" },
     });
     expect(results.map((r) => r.id)).toEqual([2, 3, 1]);
@@ -466,7 +472,7 @@ describe("nested object flattening", () => {
       items: [],
     });
 
-    const results = orm.test.aggregate({
+    const results = orm.test.O_aggregate({
       groupBy: ["status.group"],
       aggregations: { totalSum: { sum: "pricing.total" }, count: { count: "*" } },
     });
@@ -515,7 +521,7 @@ describe("sub-table item flattening", () => {
       ],
     });
 
-    const results = orm.test.findMany({ include: ["items"] });
+    const results = orm.test.O_findMany({ include: ["items"] });
     expect(results).toHaveLength(1);
     expect(results[0]!.items).toHaveLength(2);
     expect(results[0]!.items[0]!.nested).toEqual({ color: "red", size: 10 });

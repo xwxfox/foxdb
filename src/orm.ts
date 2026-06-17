@@ -138,7 +138,7 @@ export interface CreateORMOptions<
  *
  * Every key in your `tables` config becomes a fully typed **Repository**
  * with CRUD methods. The type definition below is a mapped type that
- * transforms your schema config into the actual runtime API — TypeDoc
+ * transforms your schema config into the actual runtime API - TypeDoc
  * cannot expand it, so see the example for how it works in practice.
  *
  * @see {@link Repository} for the full method reference

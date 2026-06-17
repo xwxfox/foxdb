@@ -41,7 +41,7 @@ describe("aggregate with HAVING", () => {
   });
 
   test("filters aggregated groups with having", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       groupBy: ["status"],
       aggregations: { total: { sum: "amount" } },
       having: { total: { gt: 200 } },
@@ -53,7 +53,7 @@ describe("aggregate with HAVING", () => {
   });
 
   test("having excludes groups below threshold", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       groupBy: ["status"],
       aggregations: { total: { sum: "amount" } },
       having: { total: { gt: 500 } },
@@ -63,7 +63,7 @@ describe("aggregate with HAVING", () => {
   });
 
   test("having with count aggregation", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       groupBy: ["status"],
       aggregations: { cnt: { count: "*" } },
       having: { cnt: { gte: 2 } },
@@ -72,7 +72,7 @@ describe("aggregate with HAVING", () => {
   });
 
   test("having combined with where", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       where: { amount: { gte: 200 } },
       groupBy: ["status"],
       aggregations: { total: { sum: "amount" } },

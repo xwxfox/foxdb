@@ -69,12 +69,32 @@ import {
   buildDelete,
   buildWhere,
   resolveOrderByColumn,
+  toBinding,
 } from "./query-builder.ts";
 import { buildAggregateSql } from "./aggregate.ts";
 import { buildWindowSql } from "./window.ts";
 import { BatchWriter, type BatchWriterOptions } from "./batch-writer.ts";
 import { resolveTimestampNames } from "./timestamps.ts";
 import type { TimestampConfig } from "./timestamps.ts";
+import {
+  FilterBuilder,
+  AggregateBuilder,
+  buildWhereFromNodes,
+  type InternalBuilderState,
+  type AggregateBuilderState,
+  type ConditionNode,
+} from "./filter-builder.ts";
+
+/** Safely build a Cursor from a dynamic row access. */
+function cursorValue(
+  row: Record<string, unknown>,
+  column: string
+): SqliteScalar {
+  const v = row[column];
+  if (v === null || v === undefined) return null;
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean" || typeof v === "bigint") return v;
+  return null;
+}
 
 // ─── Repository ───────────────────────────────────────────────────────────────
 
@@ -172,6 +192,7 @@ export class Repository<
       tableName,
       config.schema,
       convertGeneratedConfig(config.generated),
+      config.primaryKey.name,
     );
     this._timestampNames = resolveTimestampNames(config.timestamps, this.meta);
     this.validator = Compile(config.schema);
@@ -831,31 +852,29 @@ export class Repository<
 
   /**
    * Find many records matching the given filters.
+   * Legacy object-based API - use `findMany()` chain API for new code.
    *
    * @group Reading
    *
    * @example
    * ```ts
-   * const adults = orm.users.findMany({
+   * const adults = orm.users.O_findMany({
    *   where: { age: { gte: 18 } },
    *   orderBy: { column: "name", direction: "ASC" },
    *   limit: 10,
    * });
-   *
-   * // Include sub-tables
-   * const orders = orm.orders.findMany({ include: ["lineItems"] });
    * ```
    */
-  findMany<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): (SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] })[];
-  findMany<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): (SelectShape<TQuery, S> & TS)[];
-  findMany(opts?: FindOptions<TQuery>): Entity<Infer<TQuery>, Mat, TS>[];
-  findMany(opts: FindOptions<TQuery> = {}): (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]> & TS)[] {
+  O_findMany<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): (SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] })[];
+  O_findMany<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): (SelectShape<TQuery, S> & TS)[];
+  O_findMany(opts?: FindOptions<TQuery>): Entity<Infer<TQuery>, Mat, TS>[];
+  O_findMany(opts: FindOptions<TQuery> = {}): (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]> & TS)[] {
     return withTrace("repository.findMany", { table: this.tableName }, () => {
       const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk({ ...opts, select: opts.select }) : opts;
       const rows = this._fetchRows(resolvedOpts, "findMany");
 
 
-      // Probabilistic LRU touch — batched into a single UPDATE
+      // Probabilistic LRU touch - batched into a single UPDATE
       if (this.descriptor.eviction?.lruColumn) {
         const lruCol = this.descriptor.eviction.lruColumn;
         const pk = this.descriptor.primaryKey.name;
@@ -926,25 +945,23 @@ export class Repository<
 
   /**
    * Find many with total count - useful for pagination.
+   * Legacy object-based API - use `findPage()` chain API for new code.
    *
    * @group Reading
    *
    * @example
    * ```ts
-   * const page = orm.users.findPage({
+   * const page = orm.users.O_findPage({
    *   where: { status: { eq: "active" } },
    *   limit: 10,
    *   offset: 0,
    * });
-   * // page.data - the records
-   * // page.total - total matching records
-   * // page.limit, page.offset - what you passed in
    * ```
    */
-  findPage<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): PageResult<SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
-  findPage<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): PageResult<SelectShape<TQuery, S> & TS>;
-  findPage(opts?: FindOptions<TQuery>): PageResult<Entity<Infer<TQuery>, Mat, TS>>;
-  findPage(opts: FindOptions<TQuery> = {}): PageResult<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]> & TS> {
+  O_findPage<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): PageResult<SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
+  O_findPage<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): PageResult<SelectShape<TQuery, S> & TS>;
+  O_findPage(opts?: FindOptions<TQuery>): PageResult<Entity<Infer<TQuery>, Mat, TS>>;
+  O_findPage(opts: FindOptions<TQuery> = {}): PageResult<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]> & TS> {
     return withTrace("repository.findPage", { table: this.tableName }, () => {
       const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts;
       const { countSql, countParams } = buildSelect(
@@ -978,24 +995,19 @@ export class Repository<
   /**
    * Cursor-based pagination (seek method). Avoids OFFSET degradation on
    * large tables by using a boundary value from the previous page.
+   * Legacy object-based API - use `findCursorPage()` chain API for new code.
    *
    * @group Reading
    *
    * @example
    * ```ts
-   * const page = orm.orders.findCursorPage({
+   * const page = orm.orders.O_findCursorPage({
    *   orderBy: { column: "DocumentDate", direction: "DESC" },
-   *   limit: 25,
-   * });
-   *
-   * const next = orm.orders.findCursorPage({
-   *   orderBy: { column: "DocumentDate", direction: "DESC" },
-   *   cursor: page.nextCursor!,
    *   limit: 25,
    * });
    * ```
    */
-  findCursorPage(opts: {
+  O_findCursorPage(opts: {
     where?: WhereClause<TQuery>;
     orderBy: OrderByClause<TQuery>;
     cursor?: CursorInput;
@@ -1050,11 +1062,11 @@ export class Repository<
       }
 
       const nextCursor: Cursor | null = results.length === limit
-        ? { column: opts.orderBy.column, value: (results[results.length - 1] as Record<string, unknown>)[opts.orderBy.column] } as Cursor
+        ? { column: opts.orderBy.column, value: cursorValue(results[results.length - 1] as Record<string, unknown>, opts.orderBy.column) }
         : null;
 
       const prevCursor: Cursor | null = results.length > 0
-        ? { column: opts.orderBy.column, value: (results[0] as Record<string, unknown>)[opts.orderBy.column] } as Cursor
+        ? { column: opts.orderBy.column, value: cursorValue(results[0] as Record<string, unknown>, opts.orderBy.column) }
         : null;
 
       const result = { data: results, nextCursor, prevCursor };
@@ -1064,22 +1076,22 @@ export class Repository<
   }
 
   /**
-   * Find a single record matching the given filters. Equivalent to `findMany`
-   * with `limit: 1`, but returns the entity directly (or `null`).
+   * Find a single record matching the given filters.
+   * Legacy object-based API - use `findOne()` chain API for new code.
    *
    * @group Reading
    *
    * @example
    * ```ts
-   * const admin = orm.users.findOne({
+   * const admin = orm.users.O_findOne({
    *   where: { role: { eq: "admin" } },
    * });
    * ```
    */
-  findOne<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): (SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] }) | null;
-  findOne<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): (SelectShape<TQuery, S> & TS) | null;
-  findOne(opts?: FindOptions<TQuery>): Entity<Infer<TQuery>, Mat, TS> | null;
-  findOne(opts: FindOptions<TQuery> = {}): (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]> & TS) | null {
+  O_findOne<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): (SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] }) | null;
+  O_findOne<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): (SelectShape<TQuery, S> & TS) | null;
+  O_findOne(opts?: FindOptions<TQuery>): Entity<Infer<TQuery>, Mat, TS> | null;
+  O_findOne(opts: FindOptions<TQuery> = {}): (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]> & TS) | null {
     return withTrace("repository.findOne", { table: this.tableName }, () => {
       const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts;
       const rows = this._fetchRows({ ...resolvedOpts, limit: 1 }, "findOne");
@@ -1092,22 +1104,22 @@ export class Repository<
 
   /**
    * Iterate over records matching the given filters, yielding one row at a time.
-   * Sub-tables are hydrated in windows to keep memory stable.
+   * Legacy object-based API - use `iterate()` chain API for new code.
    *
    * @group Reading
    *
    * @example
    * ```ts
-   * for (const user of orm.users.iterate({ where: { active: { eq: true } } })) {
+   * for (const user of orm.users.O_iterate({ where: { active: { eq: true } } })) {
    *   console.log(user.name);
    * }
    * ```
    */
-  iterate<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): Generator<SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
-  iterate<const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { include: I }): Generator<Entity<Infer<TQuery>, Mat, TS> & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
-  iterate<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): Generator<SelectShape<TQuery, S> & TS>;
-  iterate(opts?: FindOptions<TQuery>): Generator<Entity<Infer<TQuery>, Mat, TS>>;
-  *iterate(opts: FindOptions<TQuery> = {}): Generator<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]> & TS> {
+  O_iterate<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): Generator<SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
+  O_iterate<const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { include: I }): Generator<Entity<Infer<TQuery>, Mat, TS> & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
+  O_iterate<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): Generator<SelectShape<TQuery, S> & TS>;
+  O_iterate(opts?: FindOptions<TQuery>): Generator<Entity<Infer<TQuery>, Mat, TS>>;
+  *O_iterate(opts: FindOptions<TQuery> = {}): Generator<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]> & TS> {
     enterTrace("repository.iterate", { table: this.tableName });
     try {
       const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts.select ? this._ensureSelectPk(opts) : opts;
@@ -1199,7 +1211,7 @@ export class Repository<
    * ```
    */
   findManyMaterialized(opts: FindOptions<TQuery> = {}): Entity<Infer<TQuery>, Mat, TS>[] {
-    const rows = this.findMany(opts);
+    const rows = this.O_findMany(opts);
     if (!this._materializeMany) return rows;
     const materialized = this._materializeMany(
       rows as Record<string, unknown>[]
@@ -1219,16 +1231,17 @@ export class Repository<
 
   /**
    * Count records matching the given filters.
+   * Legacy object-based API - use `count()` chain API for new code.
    *
    * @group Reading
    *
    * @example
    * ```ts
-   * const total = orm.users.count();
-   * const adults = orm.users.count({ age: { gte: 18 } });
+   * const total = orm.users.O_count();
+   * const adults = orm.users.O_count({ age: { gte: 18 } });
    * ```
    */
-  count(where?: WhereClause<TQuery>): number {
+  O_count(where?: WhereClause<TQuery>): number {
     return withTrace("repository.count", { table: this.tableName }, () => {
       const { sql, params } = buildWhere(where, this.descriptor.softDelete?.column, this.meta);
       const fullSql = `SELECT COUNT(*) as "_count" FROM "${this.tableName}" ${sql}`.trim();
@@ -1246,22 +1259,18 @@ export class Repository<
   /**
    * Run aggregate queries (sum, count, avg, min, max) with optional
    * grouping and filtering.
+   * Legacy object-based API - use `aggregate()` chain API for new code.
    *
    * @group Reading
    *
    * @example
    * ```ts
-   * orm.orders.aggregate({
+   * orm.orders.O_aggregate({
    *   aggregations: { total: { sum: "amount" } },
-   * });
-   *
-   * orm.orders.aggregate({
-   *   groupBy: ["status"],
-   *   aggregations: { count: { count: "*" }, avgAmount: { avg: "amount" } },
    * });
    * ```
    */
-  aggregate<
+  O_aggregate<
     const A extends Record<string, AggregationOp<TQuery>>,
     const G extends readonly (ScalarKeys<TQuery> | import("./types.ts").ScalarJsonPath<TQuery>)[] | undefined = undefined
   >(
@@ -1278,12 +1287,13 @@ export class Repository<
   /**
    * Run window function queries (rowNumber, rank, denseRank, lead, lag)
    * with partitioning and ordering.
+   * Legacy object-based API - use `windowQuery()` chain API for new code.
    *
    * @group Reading
    *
    * @example
    * ```ts
-   * orm.orders.windowQuery({
+   * orm.orders.O_windowQuery({
    *   partitionBy: ["Status__Group"],
    *   orderBy: [{ column: "DocumentDate", direction: "DESC" }],
    *   select: {
@@ -1295,7 +1305,7 @@ export class Repository<
    * });
    * ```
    */
-  windowQuery<const W extends Record<string, import("./types.ts").WindowFunction<TQuery>>>(
+  O_windowQuery<const W extends Record<string, import("./types.ts").WindowFunction<TQuery>>>(
     opts: WindowQueryOptions<TQuery> & { select: W }
   ): WindowResult<TQuery, W> {
     return withTrace("repository.windowQuery", { table: this.tableName }, () => {
@@ -1304,6 +1314,394 @@ export class Repository<
       this._emit("windowQuery", { options: opts, result: rows });
       return rows;
     });
+  }
+
+  // ─── Chain API builder entry points ────────────────────────────────────────
+
+  /**
+   * Start a chain filter query that returns many records.
+   *
+   * @group Reading - Chain API
+   *
+   * @example
+   * ```ts
+   * const adults = orm.users
+   *   .findMany()
+   *   .greaterThanOrEqual("age", 18)
+   *   .equals("active", true)
+   *   .orderBy("createdAt", "DESC")
+   *   .limit(10)
+   *   .exec();
+   * ```
+   */
+  findMany(): FilterBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS>[]> {
+    const tableName = this.tableName;
+    const meta = this.meta;
+    const queryExecutor = this._executor;
+    const softDeleteCol = this.descriptor.softDelete?.column;
+    const pk = this.descriptor.primaryKey.name;
+    const subTables = this.meta.subTables;
+    const wrap = this._wrap.bind(this);
+    const hydrateOne = this._hydrateOne.bind(this);
+    const emit = this._emit.bind(this);
+
+    const executor = (state: InternalBuilderState): Entity<Infer<TQuery>, Mat, TS>[] => {
+      const { sql: whereSql, params: whereParams } = buildWhereFromNodes(
+        state.nodes,
+        state.includeDeleted ? undefined : softDeleteCol,
+        meta
+      );
+
+      let selectCols = "*";
+      if (state.select && state.select.length > 0) {
+        selectCols = state.select.map((c) => `"${c}"`).join(", ");
+      }
+
+      const distinctPrefix = state.distinct ? "DISTINCT " : "";
+      const orderSql = state.orderBy.length > 0
+        ? "ORDER BY " + state.orderBy.map((o) => `${resolveOrderByColumn(o.column, meta)} ${o.direction}`).join(", ")
+        : "";
+      const limitOffsetParts: string[] = [];
+      const limitOffsetParams: SQLQueryBindings[] = [];
+      if (state.limit !== undefined) {
+        limitOffsetParts.push("LIMIT ?");
+        limitOffsetParams.push(state.limit);
+      }
+      if (state.offset !== undefined) {
+        limitOffsetParts.push("OFFSET ?");
+        limitOffsetParams.push(state.offset);
+      }
+
+      const sql = [
+        `SELECT ${distinctPrefix}${selectCols} FROM "${tableName}"`,
+        whereSql,
+        orderSql,
+        limitOffsetParts.join(" "),
+      ].filter(Boolean).join(" ");
+
+      const rows = queryExecutor.all<Record<string, unknown>>(sql, [...whereParams, ...limitOffsetParams], "findMany");
+
+      const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+
+      const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+      for (const sub of subTables) {
+        const included = !state.include || state.include.some((name) => name === sub.fieldName);
+        if (!included) continue;
+        if (pkValues.length === 0) continue;
+        const ph = pkValues.map(() => "?").join(", ");
+        const subRows = queryExecutor.all<Record<string, unknown>>(
+          `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+          pkValues,
+          "findMany"
+        );
+        const byOwner = new Map<string | number, Record<string, unknown>[]>();
+        for (const r of subRows) {
+          const owner = r._owner_id;
+          if (typeof owner !== "string" && typeof owner !== "number") continue;
+          if (!byOwner.has(owner)) byOwner.set(owner, []);
+          byOwner.get(owner)!.push(r);
+        }
+        prefetchedBySub.set(sub.tableName, byOwner);
+      }
+
+      const results = rows.map((r) => {
+        const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+        for (const sub of subTables) {
+          const included = !state.include || state.include.some((name) => name === sub.fieldName);
+          if (!included) continue;
+          const byOwner = prefetchedBySub.get(sub.tableName);
+          const key = r[pk];
+          const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+          rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+        }
+        return wrap(hydrateOne(r, state.include, state.select, rowPrefetched));
+      });
+
+      emit("findMany", { options: {}, result: results });
+      return results;
+    };
+
+    return new FilterBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS>[]>(executor);
+  }
+
+  /**
+   * Start a chain filter query that returns a single record.
+   *
+   * @group Reading - Chain API
+   *
+   * @example
+   * ```ts
+   * const admin = orm.users
+   *   .findOne()
+   *   .equals("role", "admin")
+   *   .exec();
+   * ```
+   */
+  findOne(): FilterBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS> | null> {
+    const tableName = this.tableName;
+    const meta = this.meta;
+    const queryExecutor = this._executor;
+    const softDeleteCol = this.descriptor.softDelete?.column;
+    const wrap = this._wrap.bind(this);
+    const hydrateOne = this._hydrateOne.bind(this);
+    const emit = this._emit.bind(this);
+
+    const executor = (state: InternalBuilderState): Entity<Infer<TQuery>, Mat, TS> | null => {
+      const { sql: whereSql, params: whereParams } = buildWhereFromNodes(
+        state.nodes,
+        state.includeDeleted ? undefined : softDeleteCol,
+        meta
+      );
+
+      let selectCols = "*";
+      if (state.select && state.select.length > 0) {
+        selectCols = state.select.map((c) => `"${c}"`).join(", ");
+      }
+
+      const orderSql = state.orderBy.length > 0
+        ? "ORDER BY " + state.orderBy.map((o) => `${resolveOrderByColumn(o.column, meta)} ${o.direction}`).join(", ")
+        : "";
+
+      const sql = [
+        `SELECT ${selectCols} FROM "${tableName}"`,
+        whereSql,
+        orderSql,
+        "LIMIT 1",
+      ].filter(Boolean).join(" ");
+
+      const row = queryExecutor.get<Record<string, unknown>>(sql, whereParams, "findOne");
+
+      if (!row) {
+        emit("findOne", { options: {}, result: null });
+        return null;
+      }
+
+      const result = wrap(hydrateOne(row, state.include, state.select));
+      emit("findOne", { options: {}, result });
+      return result;
+    };
+
+    return new FilterBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS> | null>(executor);
+  }
+
+  /**
+   * Start a chain count query.
+   *
+   * @group Reading - Chain API
+   *
+   * @example
+   * ```ts
+   * const total = orm.users
+   *   .count()
+   *   .equals("active", true)
+   *   .exec();
+   * ```
+   */
+  count(): FilterBuilder<TQuery, number> {
+    const tableName = this.tableName;
+    const meta = this.meta;
+    const queryExecutor = this._executor;
+    const softDeleteCol = this.descriptor.softDelete?.column;
+
+    const executor = (state: InternalBuilderState): number => {
+      const { sql: whereSql, params } = buildWhereFromNodes(
+        state.nodes,
+        state.includeDeleted ? undefined : softDeleteCol,
+        meta
+      );
+
+      const fullSql = `SELECT COUNT(*) as "_count" FROM "${tableName}" ${whereSql}`.trim();
+      const row = queryExecutor.get<{ _count: number }>(fullSql, params, "count");
+      const result = (row ?? { _count: 0 })._count;
+      return result;
+    };
+
+    return new FilterBuilder<TQuery, number>(executor);
+  }
+
+  /**
+   * Start a chain paginated query.
+   *
+   * @group Reading - Chain API
+   *
+   * @example
+   * ```ts
+   * const page = orm.users
+   *   .findPage()
+   *   .equals("active", true)
+   *   .limit(10)
+   *   .offset(0)
+   *   .exec();
+   * ```
+   */
+  findPage(): FilterBuilder<TQuery, PageResult<Entity<Infer<TQuery>, Mat, TS>>> {
+    const tableName = this.tableName;
+    const meta = this.meta;
+    const queryExecutor = this._executor;
+    const softDeleteCol = this.descriptor.softDelete?.column;
+    const wrap = this._wrap.bind(this);
+    const hydrateOne = this._hydrateOne.bind(this);
+
+    const executor = (state: InternalBuilderState): PageResult<Entity<Infer<TQuery>, Mat, TS>> => {
+      const { sql: whereSql, params: whereParams } = buildWhereFromNodes(
+        state.nodes,
+        state.includeDeleted ? undefined : softDeleteCol,
+        meta
+      );
+
+      let selectCols = "*";
+      if (state.select && state.select.length > 0) {
+        selectCols = state.select.map((c) => `"${c}"`).join(", ");
+      }
+
+      const orderSql = state.orderBy.length > 0
+        ? "ORDER BY " + state.orderBy.map((o) => `${resolveOrderByColumn(o.column, meta)} ${o.direction}`).join(", ")
+        : "";
+      const limitOffsetParts: string[] = [];
+      const limitOffsetParams: SQLQueryBindings[] = [];
+      if (state.limit !== undefined) {
+        limitOffsetParts.push("LIMIT ?");
+        limitOffsetParams.push(state.limit);
+      }
+      if (state.offset !== undefined) {
+        limitOffsetParts.push("OFFSET ?");
+        limitOffsetParams.push(state.offset);
+      }
+
+      const sql = [
+        `SELECT ${selectCols} FROM "${tableName}"`,
+        whereSql,
+        orderSql,
+        limitOffsetParts.join(" "),
+      ].filter(Boolean).join(" ");
+
+      const countSql = `SELECT COUNT(*) as "_count" FROM "${tableName}" ${whereSql}`.trim();
+
+      const rows = queryExecutor.all<Record<string, unknown>>(sql, [...whereParams, ...limitOffsetParams], "findPage");
+      const countRow = queryExecutor.get<{ _count: number }>(countSql, whereParams, "count");
+
+      const results = rows.map((r) => wrap(hydrateOne(r, state.include, state.select)));
+
+      return {
+        data: results,
+        total: (countRow ?? { _count: 0 })._count,
+        limit: state.limit ?? rows.length,
+        offset: state.offset ?? 0,
+      };
+    };
+
+    return new FilterBuilder<TQuery, PageResult<Entity<Infer<TQuery>, Mat, TS>>>(executor);
+  }
+
+  /**
+   * Start a chain cursor-paginated query.
+   *
+   * @group Reading - Chain API
+   *
+   * @example
+   * ```ts
+   * const page = orm.orders
+   *   .findCursorPage()
+   *   .orderBy("id", "ASC")
+   *   .limit(25)
+   *   .exec();
+   * ```
+   */
+  findCursorPage(): FilterBuilder<TQuery, CursorPageResult<Entity<Infer<TQuery>, Mat, TS>>> {
+    const tableName = this.tableName;
+    const meta = this.meta;
+    const queryExecutor = this._executor;
+    const softDeleteCol = this.descriptor.softDelete?.column;
+    const wrap = this._wrap.bind(this);
+    const hydrateOne = this._hydrateOne.bind(this);
+
+    const executor = (state: InternalBuilderState): CursorPageResult<Entity<Infer<TQuery>, Mat, TS>> => {
+      const { sql: whereSql, params: whereParams } = buildWhereFromNodes(
+        state.nodes,
+        state.includeDeleted ? undefined : softDeleteCol,
+        meta
+      );
+
+      const limit = state.limit ?? 25;
+      const direction = state.orderBy[0]?.direction ?? "ASC";
+      const colRef = state.orderBy.length > 0
+        ? resolveOrderByColumn(state.orderBy[0]!.column, meta)
+        : `"${this.descriptor.primaryKey.name}"`;
+
+      let sql = `SELECT * FROM "${tableName}"`;
+      const params: SQLQueryBindings[] = [...whereParams];
+
+      if (whereSql) sql += ` ${whereSql}`;
+      sql += ` ORDER BY ${colRef} ${direction} LIMIT ${limit}`;
+
+      const rows = queryExecutor.all<Record<string, unknown>>(sql, params, "findCursorPage");
+
+      let results = rows.map((r) => wrap(hydrateOne(r)));
+
+      const cursorCol = state.orderBy[0]?.column ?? this.descriptor.primaryKey.name;
+      const nextCursor: Cursor | null = results.length === limit
+        ? { column: cursorCol, value: cursorValue(results[results.length - 1] as Record<string, unknown>, cursorCol) }
+        : null;
+      const prevCursor: Cursor | null = results.length > 0
+        ? { column: cursorCol, value: cursorValue(results[0] as Record<string, unknown>, cursorCol) }
+        : null;
+
+      return { data: results, nextCursor, prevCursor };
+    };
+
+    return new FilterBuilder<TQuery, CursorPageResult<Entity<Infer<TQuery>, Mat, TS>>>(executor);
+  }
+
+  /**
+   * Start a chain aggregate query.
+   *
+   * @group Reading - Chain API
+   *
+   * @example
+   * ```ts
+   * const totals = orm.orders
+   *   .aggregate()
+   *   .sum("amount", "totalRevenue")
+   *   .count("*", "orderCount")
+   *   .groupBy("status")
+   *   .exec();
+   * ```
+   */
+  aggregate(): AggregateBuilder<TQuery> {
+    const tableName = this.tableName;
+    const meta = this.meta;
+    const queryExecutor = this._executor;
+    const softDeleteCol = this.descriptor.softDelete?.column;
+
+    const executor = (state: AggregateBuilderState): Record<string, unknown>[] => {
+      const aggParts: string[] = [];
+      for (const [alias, { op, field }] of Object.entries(state.aggregations)) {
+        const colRef = meta ? (meta.columnByPath.get(field)?.name ?? field) : field;
+        const safeCol = `"${colRef}"`;
+        if (op === "count" && field === "*") {
+          aggParts.push(`COUNT(*) as "${alias}"`);
+        } else {
+          aggParts.push(`${op.toUpperCase()}(${safeCol}) as "${alias}"`);
+        }
+      }
+
+      const whereResult = buildWhereFromNodes([], state.includeDeleted ? undefined : softDeleteCol, meta);
+
+      let sql = `SELECT ${aggParts.join(", ")} FROM "${tableName}"`;
+      if (whereResult.sql) sql += ` ${whereResult.sql}`;
+
+      if (state.groupBy && state.groupBy.length > 0) {
+        const groupCols = state.groupBy.map((c) => {
+          const resolved = meta ? (meta.columnByPath.get(c)?.name ?? c) : c;
+          return `"${resolved}"`;
+        }).join(", ");
+        sql += ` GROUP BY ${groupCols}`;
+      }
+
+      return queryExecutor.all<Record<string, unknown>>(sql, whereResult.params, "aggregate");
+    };
+
+    return new AggregateBuilder<TQuery>(executor);
   }
 
   // ─── Update ────────────────────────────────────────────────────────────────
@@ -1615,6 +2013,6 @@ export class Repository<
    * ```
    */
   raw<R = import("./types.ts").DBRow>(sql: string, ...params: import("./types.ts").DBValue[]): R[] {
-    return this._executor.all<R>(sql, params as SQLQueryBindings[], "raw");
+    return this._executor.all<R>(sql, params.map(toBinding), "raw");
   }
 }

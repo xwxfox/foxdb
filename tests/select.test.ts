@@ -38,7 +38,7 @@ describe("repository.select projection", () => {
   });
 
   test("findMany with select returns only chosen columns", () => {
-    const rows = orm.users.findMany({ select: ["id", "name"] });
+    const rows = orm.users.O_findMany({ select: ["id", "name"] });
     expect(rows).toHaveLength(2);
     for (const row of rows) {
       const r = row as Record<string, unknown>;
@@ -50,7 +50,7 @@ describe("repository.select projection", () => {
   });
 
   test("findOne with select returns only chosen columns", () => {
-    const row = orm.users.findOne({ where: { id: { eq: "u1" } }, select: ["name", "age"] });
+    const row = orm.users.O_findOne({ where: { id: { eq: "u1" } }, select: ["name", "age"] });
     expect(row).not.toBeNull();
     const r = row as Record<string, unknown>;
     expect("name" in r).toBe(true);
@@ -60,7 +60,7 @@ describe("repository.select projection", () => {
   });
 
   test("findPage with select returns only chosen columns", () => {
-    const page = orm.users.findPage({ select: ["email"], limit: 1 });
+    const page = orm.users.O_findPage({ select: ["email"], limit: 1 });
     expect(page.data).toHaveLength(1);
     const r = page.data[0] as Record<string, unknown>;
     expect("email" in r).toBe(true);
@@ -70,7 +70,7 @@ describe("repository.select projection", () => {
   });
 
   test("select without projection returns all columns", () => {
-    const rows = orm.users.findMany();
+    const rows = orm.users.O_findMany();
     expect(rows).toHaveLength(2);
     for (const row of rows) {
       const r = row as Record<string, unknown>;

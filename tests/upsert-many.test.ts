@@ -63,7 +63,7 @@ describe("repository.upsertMany", () => {
       conflictTarget: "id",
     });
     expect(changed).toBe(2);
-    expect(orm.users.count()).toBe(2);
+    expect(orm.users.O_count()).toBe(2);
     expect(orm.users.findById("u1")!.name).toBe("alice");
   });
 
@@ -106,7 +106,7 @@ describe("repository.upsertMany", () => {
       conflictTarget: "id",
     });
     expect(changed).toBe(5000);
-    expect(orm.users.count()).toBe(5000);
+    expect(orm.users.O_count()).toBe(5000);
   });
 
   test("reconciles sub-tables", () => {

@@ -44,19 +44,27 @@ export interface ColumnMeta {
   generatedExpr?: string;
 }
 
-/** @category Advanced */
-export interface SubTableMeta {
-  /** e.g. "lineItems" */
+type SubTableMetaCommon = {
   fieldName: string;
-  /** e.g. "sales__lineItems" */
   tableName: string;
-  /** Schema of a single item in the array */
-  itemSchema: TSchema & { properties: Record<string, TSchema> };
-  /** Columns of the sub-table row (owner PK is prepended automatically) */
   columns: ColumnMeta[];
   columnByName: Map<string, ColumnMeta>;
   columnByPath: Map<string, ColumnMeta>;
-}
+};
+
+/** @category Advanced */
+export type SubTableMeta = SubTableMetaCommon & (
+  | {
+    isScalar: true;
+    scalarType: SqliteType;
+    itemSchema?: never;
+  }
+  | {
+    isScalar?: false;
+    scalarType?: never;
+    itemSchema?: TSchema & { properties: Record<string, TSchema> };
+  }
+);
 
 /** @category Advanced */
 export interface TableMeta {
@@ -67,9 +75,18 @@ export interface TableMeta {
   columnByPath: Map<string, ColumnMeta>;
   /** Map from column name → ColumnMeta for O(1) resolution */
   columnByName: Map<string, ColumnMeta>;
+  /** The PK column name of the parent table - used for sub-table filter SQL */
+  primaryKey?: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** TSchema with index signature for dynamic property access */
+type SchemaRecord = TSchema & Record<string, unknown>;
+
+function toRecord(schema: TSchema): SchemaRecord {
+  return schema as SchemaRecord;
+}
 
 function unwrapOptional(schema: TSchema): { schema: TSchema; optional: boolean } {
   if (IsOptional(schema)) {
@@ -79,20 +96,19 @@ function unwrapOptional(schema: TSchema): { schema: TSchema; optional: boolean }
 }
 
 function schemaAnyOfMembers(schema: TSchema): TSchema[] | null {
-  const obj = schema as Record<string, unknown>;
+  const obj = toRecord(schema);
   if (obj.anyOf && Array.isArray(obj.anyOf)) {
-    return (obj.anyOf as TSchema[]);
+    return obj.anyOf as TSchema[];
   }
   return null;
 }
 
 function schemaConstValue(schema: TSchema): unknown {
-  const obj = schema as Record<string, unknown>;
-  return obj.const;
+  return toRecord(schema).const;
 }
 
 function schemaProperties(schema: TSchema): Record<string, TSchema> | null {
-  const obj = schema as Record<string, unknown>;
+  const obj = toRecord(schema);
   if (obj.properties && typeof obj.properties === "object" && obj.properties !== null) {
     return obj.properties as Record<string, TSchema>;
   }
@@ -100,7 +116,7 @@ function schemaProperties(schema: TSchema): Record<string, TSchema> | null {
 }
 
 function schemaItems(schema: TSchema): TSchema | null {
-  const obj = schema as Record<string, unknown>;
+  const obj = toRecord(schema);
   if (obj.items && typeof obj.items === "object" && obj.items !== null) {
     return obj.items as TSchema;
   }
@@ -115,11 +131,17 @@ function isNullableUnion(schema: TSchema): boolean {
   const members = schemaAnyOfMembers(schema);
   if (members) {
     return members.some((item) => {
-      const obj = item as Record<string, unknown>;
+      const obj = toRecord(item);
       return obj.type === "null";
     });
   }
   return false;
+}
+
+function inferScalarSqlType(schema: TSchema): SqliteType {
+  if (IsInteger(schema) || IsBoolean(schema)) return "INTEGER";
+  if (IsNumber(schema)) return "REAL";
+  return "TEXT";
 }
 
 function schemaToSqlType(schema: TSchema): SqliteType {
@@ -136,10 +158,7 @@ function schemaToSqlType(schema: TSchema): SqliteType {
   if (isNullableUnion(schema)) {
     const members = schemaAnyOfMembers(schema);
     if (members) {
-      const nonNull = members.find((m) => {
-        const obj = m as Record<string, unknown>;
-        return obj.type !== "null";
-      });
+      const nonNull = members.find((m) => toRecord(m).type !== "null");
       if (nonNull) return schemaToSqlType(nonNull);
     }
   }
@@ -152,10 +171,7 @@ function isScalarLike(schema: TSchema): boolean {
   if (isNullableUnion(schema)) {
     const members = schemaAnyOfMembers(schema);
     if (members) {
-      const nonNull = members.find((m) => {
-        const obj = m as Record<string, unknown>;
-        return obj.type !== "null";
-      });
+      const nonNull = members.find((m) => toRecord(m).type !== "null");
       if (!nonNull) return false;
       return isScalarLike(nonNull);
     }
@@ -241,33 +257,60 @@ export function convertGeneratedConfig(
 export function introspectTable(
   tableName: string,
   schema: TSchema & { properties: Record<string, TSchema> },
-  generated?: Array<{ name: string; expr: string; sqlType?: SqliteType }>
+  generated?: Array<{ name: string; expr: string; sqlType?: SqliteType }>,
+  primaryKey?: string
 ): TableMeta {
   const subTables: SubTableMeta[] = [];
+  const arrayFieldNames = new Set<string>();
 
   for (const [fieldName, raw] of Object.entries(schema.properties)) {
-    if (IsArray(raw) && IsObject(raw.items)) {
-      const itemSchema = raw.items;
-      const subTableName = `${tableName}__${fieldName}`;
-      const subCols = buildColumns(itemSchema.properties, [], 0, false);
-      const subByName = new Map<string, ColumnMeta>();
-      const subByPath = new Map<string, ColumnMeta>();
-      for (const col of subCols) {
-        subByName.set(col.name, col);
-        if (col.path) subByPath.set(col.path.join("."), col);
+    if (IsArray(raw)) {
+      arrayFieldNames.add(fieldName);
+      if (IsObject(raw.items)) {
+        const itemSchema = raw.items;
+        const subTableName = `${tableName}__${fieldName}`;
+        const subCols = buildColumns(itemSchema.properties, [], 0, false);
+        const subByName = new Map<string, ColumnMeta>();
+        const subByPath = new Map<string, ColumnMeta>();
+        for (const col of subCols) {
+          subByName.set(col.name, col);
+          if (col.path) subByPath.set(col.path.join("."), col);
+        }
+        subTables.push({
+          fieldName,
+          tableName: subTableName,
+          itemSchema,
+          columns: subCols,
+          columnByName: subByName,
+          columnByPath: subByPath,
+        });
+      } else {
+        // Scalar array - stored as a sub-table with a _value column
+        const scalarType = inferScalarSqlType(raw.items);
+        const subTableName = `${tableName}__${fieldName}`;
+        const _valueCol: ColumnMeta = {
+          name: "_value",
+          sqlType: scalarType,
+          nullable: false,
+          optional: false,
+        };
+        const subByName = new Map<string, ColumnMeta>([["_value", _valueCol]]);
+        const subByPath = new Map<string, ColumnMeta>();
+        subTables.push({
+          fieldName,
+          tableName: subTableName,
+          columns: [_valueCol],
+          columnByName: subByName,
+          columnByPath: subByPath,
+          isScalar: true,
+          scalarType,
+        });
       }
-      subTables.push({
-        fieldName,
-        tableName: subTableName,
-        itemSchema,
-        columns: subCols,
-        columnByName: subByName,
-        columnByPath: subByPath,
-      });
     }
   }
 
-  const columns = buildColumns(schema.properties, [], 0, true);
+  const columns = buildColumns(schema.properties, [], 0, true)
+    .filter(col => !arrayFieldNames.has(col.name));
 
   if (generated) {
     for (const g of generated) {
@@ -288,7 +331,7 @@ export function introspectTable(
     columnByName.set(col.name, col);
     if (col.path) columnByPath.set(col.path.join("."), col);
   }
-  return { tableName, columns, subTables, columnByPath, columnByName };
+  return { tableName, columns, subTables, columnByPath, columnByName, primaryKey };
 }
 
 // ─── DDL generation ───────────────────────────────────────────────────────────
@@ -313,22 +356,44 @@ export function buildCreateTableSQL(
 
   // Sub-tables - each gets an auto _rowid_ and a FK back to owner
   for (const sub of meta.subTables) {
-    const subCols = [
-      `  "_id" INTEGER PRIMARY KEY AUTOINCREMENT`,
-      `  "_owner_id" ${meta.columns.find((c) => c.name === primaryKey)?.sqlType ?? "TEXT"} NOT NULL`,
-      `  "_index" INTEGER NOT NULL`,
-      ...sub.columns.map((c) => {
-        const notNull = !c.nullable ? " NOT NULL" : "";
-        return `  "${c.name}" ${c.sqlType}${notNull}`;
-      }),
-    ];
-    stmts.push(
-      `CREATE TABLE IF NOT EXISTS "${sub.tableName}" (\n${subCols.join(",\n")}\n)`
-    );
-    // Index on owner FK for fast hydration
-    stmts.push(
-      `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__owner" ON "${sub.tableName}" ("_owner_id")`
-    );
+    if (sub.isScalar) {
+      const pkColMeta = meta.columns.find((c) => c.name === primaryKey);
+      const pkType = pkColMeta?.sqlType ?? "TEXT";
+      stmts.push(
+        `CREATE TABLE IF NOT EXISTS "${sub.tableName}" (\n` +
+        `  "_id" INTEGER PRIMARY KEY AUTOINCREMENT,\n` +
+        `  "_owner_id" ${pkType} NOT NULL,\n` +
+        `  "_index" INTEGER NOT NULL,\n` +
+        `  "_value" ${sub.scalarType} NOT NULL\n)`
+      );
+      stmts.push(`CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__owner" ON "${sub.tableName}" ("_owner_id")`);
+      stmts.push(`CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__value" ON "${sub.tableName}" ("_value")`);
+    } else {
+      const subCols = [
+        `  "_id" INTEGER PRIMARY KEY AUTOINCREMENT`,
+        `  "_owner_id" ${meta.columns.find((c) => c.name === primaryKey)?.sqlType ?? "TEXT"} NOT NULL`,
+        `  "_index" INTEGER NOT NULL`,
+        ...sub.columns.map((c) => {
+          const notNull = !c.nullable ? " NOT NULL" : "";
+          return `  "${c.name}" ${c.sqlType}${notNull}`;
+        }),
+      ];
+      stmts.push(
+        `CREATE TABLE IF NOT EXISTS "${sub.tableName}" (\n${subCols.join(",\n")}\n)`
+      );
+      // Index on owner FK for fast hydration
+      stmts.push(
+        `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__owner" ON "${sub.tableName}" ("_owner_id")`
+      );
+      // Auto-index direct (non-path) scalar columns on object-array sub-tables
+      for (const col of sub.columns) {
+        if (!col.path) {
+          stmts.push(
+            `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__${col.name}" ON "${sub.tableName}" ("${col.name}")`
+          );
+        }
+      }
+    }
   }
 
   return stmts;
@@ -361,13 +426,17 @@ function encodeValue(v: unknown, sqlType: SqliteType): DBValue {
   if (v === undefined || v === null) return null;
   if (sqlType === "TEXT" && typeof v === "object") return JSON.stringify(v);
   if (sqlType === "INTEGER" && typeof v === "boolean") return v ? 1 : 0;
-  return toSqliteScalar(v) as DBValue;
+  return toSqliteScalar(v);
 }
 
 function encodeValueWithCodec(v: unknown, sqlType: SqliteType, codec: ColumnCodec | undefined): DBValue {
   const encoded = encodeValue(v, sqlType);
   if (!codec) return encoded;
-  return codec.encode(encoded) as DBValue;
+  return codec.encode(encoded);
+}
+
+function asRecord(v: unknown): Record<string, unknown> {
+  return v as Record<string, unknown>;
 }
 
 function getValueAtPath(obj: unknown, path: string[]): unknown {
@@ -375,7 +444,7 @@ function getValueAtPath(obj: unknown, path: string[]): unknown {
   for (const key of path) {
     if (current === null || current === undefined) return undefined;
     if (typeof current !== "object") return undefined;
-    current = (current as Record<string, unknown>)[key];
+    current = asRecord(current)[key];
   }
   return current;
 }
@@ -385,7 +454,7 @@ function setValueAtPath(obj: Record<string, unknown>, path: string[], value: unk
   for (let i = 0; i < path.length - 1; i++) {
     const key = path[i]!;
     if (!(key in current)) current[key] = {};
-    current = current[key] as Record<string, unknown>;
+    current = asRecord(current[key]);
   }
   current[path[path.length - 1]!] = value;
 }
@@ -452,6 +521,18 @@ export function flattenSubRows(
   sub: SubTableMeta,
   codecs?: Map<string, ColumnCodec>
 ): Array<Record<string, unknown>> {
+  if (sub.isScalar) {
+    const result: Array<Record<string, unknown>> = new Array(items.length);
+    for (let idx = 0; idx < items.length; idx++) {
+      const v = items[idx];
+      result[idx] = {
+        _owner_id: ownerPk,
+        _index: idx,
+        _value: encodeValue(v, sub.scalarType),
+      };
+    }
+    return result;
+  }
   const result: Array<Record<string, unknown>> = new Array(items.length);
   if (!codecs?.size) {
     for (let idx = 0; idx < items.length; idx++) {
@@ -459,7 +540,7 @@ export function flattenSubRows(
       if (item === null || typeof item !== "object") {
         throw new TypeError("Sub-table item must be an object");
       }
-      const obj = item as Record<string, unknown>;
+      const obj = asRecord(item);
       const row: Record<string, unknown> = {
         _owner_id: ownerPk,
         _index: idx,
@@ -476,7 +557,7 @@ export function flattenSubRows(
       if (item === null || typeof item !== "object") {
         throw new TypeError("Sub-table item must be an object");
       }
-      const obj = item as Record<string, unknown>;
+      const obj = asRecord(item);
       const row: Record<string, unknown> = {
         _owner_id: ownerPk,
         _index: idx,
@@ -568,7 +649,7 @@ export function hydrateRow(
   const obj: Record<string, unknown> = {};
 
   if (!select) {
-    // No select filtering — iterate all columns
+    // No select filtering - iterate all columns
     if (!codecs?.size) {
       for (const col of meta.columns) {
         const v = decodeValue(flat[col.name], col.sqlType, col.isBoolean);
@@ -600,7 +681,7 @@ export function hydrateRow(
       }
     }
   } else {
-    // select filtering — build a set of selected columns
+    // select filtering - build a set of selected columns
     const selectedSet = new Set<string>();
     for (const s of select) {
       selectedSet.add(s);
@@ -654,6 +735,9 @@ export function hydrateRow(
   for (const sub of meta.subTables) {
     if (include && !include.includes(sub.fieldName)) {
       obj[sub.fieldName] = [];
+    } else if (sub.isScalar) {
+      const rows = subRows.get(sub.tableName) ?? [];
+      obj[sub.fieldName] = rows.map(r => decodeValue(r._value, sub.scalarType));
     } else {
       obj[sub.fieldName] = subRows.get(sub.tableName) ?? [];
     }

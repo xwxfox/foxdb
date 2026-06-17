@@ -487,6 +487,30 @@ export interface CursorPageResult<T> {
 export type SelectableKeys<T extends TSchema & { properties: Record<string, TSchema> }> =
   ScalarKeys<T> | ObjectKeys<T> | PrimitiveArrayKeys<T> | JsonPath<T>;
 
+// ─── Chain Filter Builder types ───────────────────────────────────────────────
+
+export type FilterableFields<T extends TSchema & { properties: Record<string, TSchema> }> =
+  ScalarKeys<T> | ObjectKeys<T> | ScalarJsonPath<T> | SubTableScalarPath<T>;
+
+export type FieldType<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  P extends FilterableFields<T>
+> = PathValue<T, P>;
+
+export type ArrayFilterableFields<T extends TSchema & { properties: Record<string, TSchema> }> =
+  PrimitiveArrayKeys<T>;
+
+export type ArrayItemType<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  P extends ArrayFilterableFields<T>
+> = UnwrapOptional<T["properties"][P]> extends TArray<infer Item> ? Static<Item> : never;
+
+export type OrderableFields<T extends TSchema & { properties: Record<string, TSchema> }> =
+  ScalarKeys<T> | ScalarJsonPath<T>;
+
+export type DistinctableFields<T extends TSchema & { properties: Record<string, TSchema> }> =
+  ScalarKeys<T> | ScalarJsonPath<T>;
+
 export interface FindOptions<T extends TSchema & { properties: Record<string, TSchema> }> extends PaginationOptions {
   where?: WhereClause<T>;
   orderBy?: OrderByClause<T> | OrderByClause<T>[];

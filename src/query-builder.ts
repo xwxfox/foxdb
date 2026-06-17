@@ -82,10 +82,18 @@ function resolveJsonColumn(column: string, meta?: TableMeta): { sql: string } | 
   return { sql: `JSON_EXTRACT("${safeColumn}", '$.${escapeSqlString(path)}')` };
 }
 
+/** Safely convert a runtime value to SQLite-compatible binding. */
+export function toBinding(v: unknown): SQLQueryBindings {
+  if (v === null) return null;
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean" || typeof v === "bigint") return v;
+  if (v instanceof Uint8Array) return v;
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
 /** SQLite stores nested objects as JSON TEXT; mirror that when binding params. */
 function paramValue(v: unknown): SQLQueryBindings {
-  if (v !== null && typeof v === "object") return JSON.stringify(v);
-  return v as SQLQueryBindings;
+  return toBinding(v);
 }
 
 export function buildFilter(column: string, filter: FilterShape, meta?: TableMeta): FilterEntry {
@@ -122,18 +130,51 @@ export function buildFilter(column: string, filter: FilterShape, meta?: TableMet
   if ("isNull" in filter) parts.push(`${colRef} IS NULL`);
   if ("isNotNull" in filter) parts.push(`${colRef} IS NOT NULL`);
   if ("arraySome" in filter) {
-    parts.push(`EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`);
+    const scalarSub = meta?.subTables.find(
+      st => st.fieldName === column && st.isScalar
+    );
+    if (scalarSub && meta?.primaryKey) {
+      parts.push(
+        `"${meta.primaryKey}" IN (SELECT "_owner_id" FROM "${scalarSub.tableName}" WHERE "_value" = ?)`
+      );
+    } else {
+      parts.push(`EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`);
+    }
     params.push(paramValue(filter.arraySome));
   }
   if ("arrayNot" in filter) {
-    parts.push(`NOT EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`);
+    const scalarSub = meta?.subTables.find(
+      st => st.fieldName === column && st.isScalar
+    );
+    if (scalarSub && meta?.primaryKey) {
+      parts.push(
+        `"${meta.primaryKey}" NOT IN (SELECT "_owner_id" FROM "${scalarSub.tableName}" WHERE "_value" = ?)`
+      );
+    } else {
+      parts.push(`NOT EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`);
+    }
     params.push(paramValue(filter.arrayNot));
   }
   if ("isEmpty" in filter) {
-    if (filter.isEmpty) {
-      parts.push(`(json_array_length(${colRef}) = 0 OR ${colRef} IS NULL)`);
+    const scalarSub = meta?.subTables.find(
+      st => st.fieldName === column && st.isScalar
+    );
+    if (scalarSub && meta?.primaryKey) {
+      if (filter.isEmpty) {
+        parts.push(
+          `"${meta.primaryKey}" NOT IN (SELECT DISTINCT "_owner_id" FROM "${scalarSub.tableName}")`
+        );
+      } else {
+        parts.push(
+          `"${meta.primaryKey}" IN (SELECT DISTINCT "_owner_id" FROM "${scalarSub.tableName}")`
+        );
+      }
     } else {
-      parts.push(`json_array_length(${colRef}) > 0`);
+      if (filter.isEmpty) {
+        parts.push(`(json_array_length(${colRef}) = 0 OR ${colRef} IS NULL)`);
+      } else {
+        parts.push(`json_array_length(${colRef}) > 0`);
+      }
     }
   }
   if ("fastArrayIsEmpty" in filter) {
@@ -510,7 +551,7 @@ export function buildInsert(
   const placeholders = keys.map(() => "?").join(", ");
   return {
     sql: `INSERT INTO "${tableName}" (${cols}) VALUES (${placeholders})`,
-    params: keys.map((k) => row[k] as SQLQueryBindings),
+    params: keys.map((k) => toBinding(row[k])),
   };
 }
 
@@ -535,7 +576,7 @@ export function buildInsertMany(
       const ph = keys.map(() => "?").join(", ");
       return `(${ph})`;
     }).join(", ");
-    const params = batch.flatMap((row) => keys.map((k) => row[k] as SQLQueryBindings));
+    const params = batch.flatMap((row) => keys.map((k) => toBinding(row[k])));
     batches.push({ sql: `INSERT INTO "${tableName}" (${cols}) VALUES ${valueGroups}`, params });
   }
   return batches;
@@ -559,7 +600,7 @@ export function buildUpsert(
 
   return {
     sql: `INSERT INTO "${tableName}" (${cols}) VALUES (${placeholders}) ON CONFLICT (${conflict}) DO UPDATE SET ${updates}`,
-    params: keys.map((k) => row[k] as SQLQueryBindings),
+    params: keys.map((k) => toBinding(row[k])),
   };
 }
 
@@ -590,7 +631,7 @@ export function buildUpsertMany(
       const ph = keys.map(() => "?").join(", ");
       return `(${ph})`;
     }).join(", ");
-    const params = batch.flatMap((row) => keys.map((k) => row[k] as SQLQueryBindings));
+    const params = batch.flatMap((row) => keys.map((k) => toBinding(row[k])));
     batches.push({
       sql: `INSERT INTO "${tableName}" (${cols}) VALUES ${valueGroups} ON CONFLICT (${conflict}) DO UPDATE SET ${updates}`,
       params,
@@ -614,7 +655,7 @@ export function buildUpdate<T extends TSchema & { properties: Record<string, TSc
   const sets = entries.map(([k]) => `"${k}" = ?`).join(", ");
   return {
     sql: `UPDATE "${tableName}" SET ${sets} WHERE "${pk}" = ?`,
-    params: [...entries.map(([, v]) => v as SQLQueryBindings), pkValue as SQLQueryBindings],
+    params: [...entries.map(([, v]) => toBinding(v)), toBinding(pkValue)],
   };
 }
 
@@ -633,7 +674,7 @@ export function buildUpdateWhere<T extends TSchema & { properties: Record<string
   const { sql: whereSql, params: whereParams } = buildWhere(where, softDeleteColumn, meta);
   return {
     sql: `UPDATE "${tableName}" SET ${sets} ${whereSql}`.trim(),
-    params: [...entries.map(([, v]) => v as SQLQueryBindings), ...whereParams],
+    params: [...entries.map(([, v]) => toBinding(v)), ...whereParams],
   };
 }
 

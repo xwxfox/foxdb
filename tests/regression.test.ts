@@ -56,8 +56,8 @@ describe("regression suite", () => {
     orm.users.insertMany(Array.from({ length: 50 }, (_, i) => ({
       id: globalThis.String(i), name: `u${i}`, email: `u${i}@x.com`, age: i, tags: [],
     })));
-    expect(orm.users.count()).toBe(50);
-    expect(orm.users.findMany({ limit: 10 })).toHaveLength(10);
+    expect(orm.users.O_count()).toBe(50);
+    expect(orm.users.O_findMany({ limit: 10 })).toHaveLength(10);
   });
 
   test("streaming iterate does not materialize full array", () => {
@@ -65,13 +65,13 @@ describe("regression suite", () => {
       id: globalThis.String(i), name: `u${i}`, email: `u${i}@x.com`, age: i, tags: [],
     })));
     let count = 0;
-    for (const _ of orm.users.iterate()) count++;
+    for (const _ of orm.users.O_iterate()) count++;
     expect(count).toBe(1000);
   });
 
   test("select projection omits unselected columns", () => {
     orm.users.insert({ id: "1", name: "a", email: "a@x.com", age: 1, tags: [] });
-    const rows = orm.users.findMany({ select: ["id", "name"] });
+    const rows = orm.users.O_findMany({ select: ["id", "name"] });
     expect("email" in rows[0]!).toBe(false);
   });
 
@@ -80,7 +80,7 @@ describe("regression suite", () => {
       { id: "1", name: "a", email: "a@x.com", age: 10, tags: [] },
       { id: "2", name: "b", email: "b@x.com", age: 20, tags: [] },
     ]);
-    const rows = orm.users.aggregate({ aggregations: { totalAge: { sum: "age" } } });
+    const rows = orm.users.O_aggregate({ aggregations: { totalAge: { sum: "age" } } });
     expect(rows[0]!.totalAge).toBe(30);
   });
 });

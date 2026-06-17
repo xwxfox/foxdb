@@ -40,7 +40,7 @@ describe("repository.iterate", () => {
 
   test("yields all rows without options", () => {
     const names: string[] = [];
-    for (const user of orm.users.iterate()) {
+    for (const user of orm.users.O_iterate()) {
       names.push(user.name);
     }
     expect(names).toHaveLength(4);
@@ -52,7 +52,7 @@ describe("repository.iterate", () => {
 
   test("respects where clause", () => {
     const names: string[] = [];
-    for (const user of orm.users.iterate({ where: { age: { gte: 30 } } })) {
+    for (const user of orm.users.O_iterate({ where: { age: { gte: 30 } } })) {
       names.push(user.name);
     }
     expect(names).toHaveLength(2);
@@ -62,7 +62,7 @@ describe("repository.iterate", () => {
 
   test("respects limit", () => {
     const names: string[] = [];
-    for (const user of orm.users.iterate({ limit: 2 })) {
+    for (const user of orm.users.O_iterate({ limit: 2 })) {
       names.push(user.name);
     }
     expect(names).toHaveLength(2);
@@ -70,7 +70,7 @@ describe("repository.iterate", () => {
 
   test("respects orderBy", () => {
     const names: string[] = [];
-    for (const user of orm.users.iterate({ orderBy: { column: "age", direction: "DESC" } })) {
+    for (const user of orm.users.O_iterate({ orderBy: { column: "age", direction: "DESC" } })) {
       names.push(user.name);
     }
     expect(names[0]).toBe("charlie");
@@ -79,7 +79,7 @@ describe("repository.iterate", () => {
 
   test("works with select projection", () => {
     const rows: Array<Record<string, unknown>> = [];
-    for (const user of orm.users.iterate({ select: ["id", "name"] })) {
+    for (const user of orm.users.O_iterate({ select: ["id", "name"] })) {
       rows.push(user as Record<string, unknown>);
     }
     expect(rows).toHaveLength(4);

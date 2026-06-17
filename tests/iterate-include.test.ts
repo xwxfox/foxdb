@@ -48,7 +48,7 @@ describe("repository.iterate with include", () => {
 
   test("yields rows with sub-tables hydrated", () => {
     let count = 0;
-    for (const order of orm.orders.iterate({ include: ["items"] })) {
+    for (const order of orm.orders.O_iterate({ include: ["items"] })) {
       expect(order.items).toHaveLength(2);
       expect(order.items[0]!.name).toBe(`item-a-${count}`);
       count++;
@@ -58,7 +58,7 @@ describe("repository.iterate with include", () => {
 
   test("respects where clause with include", () => {
     let count = 0;
-    for (const order of orm.orders.iterate({ where: { total: { gte: 1000 } }, include: ["items"] })) {
+    for (const order of orm.orders.O_iterate({ where: { total: { gte: 1000 } }, include: ["items"] })) {
       expect(order.total).toBeGreaterThanOrEqual(1000);
       expect(order.items).toHaveLength(2);
       count++;
@@ -68,7 +68,7 @@ describe("repository.iterate with include", () => {
 
   test("respects limit with include", () => {
     let count = 0;
-    for (const order of orm.orders.iterate({ include: ["items"], limit: 50 })) {
+    for (const order of orm.orders.O_iterate({ include: ["items"], limit: 50 })) {
       count++;
     }
     expect(count).toBe(50);
@@ -76,7 +76,7 @@ describe("repository.iterate with include", () => {
 
   test("works with select and include", () => {
     let count = 0;
-    for (const order of orm.orders.iterate({ select: ["id", "total"], include: ["items"] })) {
+    for (const order of orm.orders.O_iterate({ select: ["id", "total"], include: ["items"] })) {
       expect("id" in order).toBe(true);
       expect("total" in order).toBe(true);
       expect("items" in order).toBe(true);

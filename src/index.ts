@@ -30,6 +30,17 @@ export type { foxdb, CreateORMOptions, CreateORMBaseOptions } from "./orm.ts";
 /** @category Repositories */
 export { Repository } from "./repository.ts";
 
+// ─── Chain Query API ──────────────────────────────────────────────────────────
+
+/** @category Query Building */
+export { FilterBuilder, AggregateBuilder, buildWhereFromNodes } from "./filter-builder.ts";
+/** @category Query Building */
+export type {
+  ConditionNode,
+  InternalBuilderState,
+  AggregateBuilderState,
+} from "./filter-builder.ts";
+
 // ─── Database ─────────────────────────────────────────────────────────────────
 
 /** @category Database */
@@ -69,6 +80,12 @@ export type {
   ScalarFilter,
   AggregateOptions,
   AggregationOp,
+  FilterableFields,
+  FieldType,
+  ArrayFilterableFields,
+  ArrayItemType,
+  OrderableFields,
+  DistinctableFields,
 } from "./types.ts";
 
 // ─── Relations ────────────────────────────────────────────────────────────────

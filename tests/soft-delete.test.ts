@@ -19,17 +19,17 @@ describe("soft deletes", () => {
 
   test("findMany hides deleted rows", () => {
     orm.users.deleteById("1");
-    expect(orm.users.findMany()).toHaveLength(0);
+    expect(orm.users.O_findMany()).toHaveLength(0);
   });
 
   test("includeDeleted shows all rows", () => {
     orm.users.deleteById("1");
-    expect(orm.users.findMany({ includeDeleted: true })).toHaveLength(1);
+    expect(orm.users.O_findMany({ includeDeleted: true })).toHaveLength(1);
   });
 
   test("deleteWhere sets deletedAt", () => {
     orm.users.deleteWhere({ name: { eq: "a" } });
-    const row = orm.users.findOne({ includeDeleted: true });
+    const row = orm.users.O_findOne({ includeDeleted: true });
     expect(row!.deletedAt).toBeTypeOf("number");
   });
 });

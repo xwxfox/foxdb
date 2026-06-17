@@ -41,26 +41,26 @@ describe("DISTINCT queries", () => {
   });
 
   test("distinct returns unique rows", () => {
-    const rows = orm.users.findMany({ distinct: true });
+    const rows = orm.users.O_findMany({ distinct: true });
     expect(rows).toHaveLength(4);
   });
 
   test("distinct with select returns unique values", () => {
-    const rows = orm.users.findMany({ select: ["name"], distinct: true });
+    const rows = orm.users.O_findMany({ select: ["name"], distinct: true });
     expect(rows).toHaveLength(3);
     const names = rows.map((r) => r.name).sort();
     expect(names).toEqual(["alice", "bob", "charlie"]);
   });
 
   test("distinctOn emulates via GROUP BY", () => {
-    const rows = orm.users.findMany({ distinctOn: ["name"] });
+    const rows = orm.users.O_findMany({ distinctOn: ["name"] });
     expect(rows).toHaveLength(3);
     const names = rows.map((r) => r.name).sort();
     expect(names).toEqual(["alice", "bob", "charlie"]);
   });
 
   test("distinctOn with where filter", () => {
-    const rows = orm.users.findMany({
+    const rows = orm.users.O_findMany({
       where: { age: { gte: 25 } },
       distinctOn: ["age"],
     });
@@ -70,13 +70,13 @@ describe("DISTINCT queries", () => {
   });
 
   test("findPage with distinct returns correct total", () => {
-    const page = orm.users.findPage({ select: ["name"], distinct: true });
+    const page = orm.users.O_findPage({ select: ["name"], distinct: true });
     expect(page.total).toBe(3);
     expect(page.data).toHaveLength(3);
   });
 
   test("findPage with distinctOn returns correct total", () => {
-    const page = orm.users.findPage({ distinctOn: ["age"] });
+    const page = orm.users.O_findPage({ distinctOn: ["age"] });
     expect(page.total).toBe(3);
     expect(page.data).toHaveLength(3);
   });

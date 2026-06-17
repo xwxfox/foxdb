@@ -42,7 +42,7 @@ describe("repository.windowQuery", () => {
   });
 
   test("rowNumber", () => {
-    const rows = orm.orders.windowQuery({
+    const rows = orm.orders.O_windowQuery({
       orderBy: [{ column: "amount", direction: "ASC" }],
       select: { rn: { rowNumber: true } },
     });
@@ -52,7 +52,7 @@ describe("repository.windowQuery", () => {
   });
 
   test("rank with ties", () => {
-    const rows = orm.orders.windowQuery({
+    const rows = orm.orders.O_windowQuery({
       orderBy: [{ column: "amount", direction: "ASC" }],
       select: { rnk: { rank: true } },
     });
@@ -64,7 +64,7 @@ describe("repository.windowQuery", () => {
   });
 
   test("denseRank", () => {
-    const rows = orm.orders.windowQuery({
+    const rows = orm.orders.O_windowQuery({
       orderBy: [{ column: "amount", direction: "ASC" }],
       select: { drnk: { denseRank: true } },
     });
@@ -76,7 +76,7 @@ describe("repository.windowQuery", () => {
   });
 
   test("lead", () => {
-    const rows = orm.orders.windowQuery({
+    const rows = orm.orders.O_windowQuery({
       orderBy: [{ column: "amount", direction: "ASC" }],
       select: { nextAmount: { lead: "amount", offset: 1 } },
     });
@@ -86,7 +86,7 @@ describe("repository.windowQuery", () => {
   });
 
   test("lag", () => {
-    const rows = orm.orders.windowQuery({
+    const rows = orm.orders.O_windowQuery({
       orderBy: [{ column: "amount", direction: "ASC" }],
       select: { prevAmount: { lag: "amount", offset: 1 } },
     });
@@ -96,7 +96,7 @@ describe("repository.windowQuery", () => {
   });
 
   test("partitionBy", () => {
-    const rows = orm.orders.windowQuery({
+    const rows = orm.orders.O_windowQuery({
       partitionBy: ["status"],
       orderBy: [{ column: "amount", direction: "ASC" }],
       select: { rn: { rowNumber: true } },
@@ -108,7 +108,7 @@ describe("repository.windowQuery", () => {
   });
 
   test("with where filter", () => {
-    const rows = orm.orders.windowQuery({
+    const rows = orm.orders.O_windowQuery({
       where: { status: { eq: "pending" } },
       orderBy: [{ column: "amount", direction: "ASC" }],
       select: { rn: { rowNumber: true } },
@@ -118,7 +118,7 @@ describe("repository.windowQuery", () => {
   });
 
   test("with limit", () => {
-    const rows = orm.orders.windowQuery({
+    const rows = orm.orders.O_windowQuery({
       orderBy: [{ column: "amount", direction: "ASC" }],
       select: { rn: { rowNumber: true } },
       limit: 2,

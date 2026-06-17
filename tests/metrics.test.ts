@@ -30,7 +30,7 @@ describe("QueryMetrics hook", () => {
 
     orm.users.insert({ id: "u1", name: "alice", age: 30 });
     orm.users.findById("u1");
-    orm.users.findMany();
+    orm.users.O_findMany();
 
     const findByIdMetric = metrics.find((m) => m.operation === "findById");
     expect(findByIdMetric).toBeDefined();
@@ -84,7 +84,7 @@ describe("QueryMetrics hook", () => {
     });
 
     orm.users.insert({ id: "u1", name: "alice", age: 30 });
-    orm.users.aggregate({
+    orm.users.O_aggregate({
       aggregations: { total: { count: "*" } },
     });
 

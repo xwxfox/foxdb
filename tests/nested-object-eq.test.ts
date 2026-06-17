@@ -31,7 +31,7 @@ test("flattened dotted path eq filter returns matching rows", () => {
     status: { group: "inactive", blocked: true },
   });
 
-  const results = orm.nested.findMany({
+  const results = orm.nested.O_findMany({
     where: { AND: [{ "pricing.total": { eq: 100 } }, { "pricing.currency": { eq: "DKK" } }] },
   });
 
@@ -53,7 +53,7 @@ test("flattened dotted path ne filter returns non-matching rows", () => {
     status: { group: "inactive", blocked: true },
   });
 
-  const results = orm.nested.findMany({
+  const results = orm.nested.O_findMany({
     where: { OR: [{ "pricing.total": { ne: 100 } }, { "pricing.currency": { ne: "DKK" } }] },
   });
 
@@ -75,7 +75,7 @@ test("dotted path eq filter returns matching rows", () => {
     status: { group: "inactive", blocked: true },
   });
 
-  const results = orm.nested.findMany({
+  const results = orm.nested.O_findMany({
     where: { "pricing.total": { eq: 100 } },
   });
 
@@ -102,7 +102,7 @@ test("dotted path gt filter returns matching rows", () => {
     status: { group: "pending", blocked: false },
   });
 
-  const results = orm.nested.findMany({
+  const results = orm.nested.O_findMany({
     where: { "pricing.total": { gt: 75 } },
   });
 
@@ -124,7 +124,7 @@ test("dotted path like filter returns matching rows", () => {
     status: { group: "inactive", blocked: true },
   });
 
-  const results = orm.nested.findMany({
+  const results = orm.nested.O_findMany({
     where: { "status.group": { like: "act%" } },
   });
 
@@ -151,7 +151,7 @@ test("dotted path in filter returns matching rows", () => {
     status: { group: "pending", blocked: false },
   });
 
-  const results = orm.nested.findMany({
+  const results = orm.nested.O_findMany({
     where: { "pricing.currency": { in: ["DKK", "EUR"] } },
   });
 
@@ -173,7 +173,7 @@ test("dotted path ne filter returns non-matching rows", () => {
     status: { group: "inactive", blocked: true },
   });
 
-  const results = orm.nested.findMany({
+  const results = orm.nested.O_findMany({
     where: { "pricing.currency": { ne: "DKK" } },
   });
 
@@ -200,7 +200,7 @@ test("dotted path gte filter returns matching rows", () => {
     status: { group: "pending", blocked: false },
   });
 
-  const results = orm.nested.findMany({
+  const results = orm.nested.O_findMany({
     where: { "pricing.total": { gte: 100 } },
   });
 
@@ -227,7 +227,7 @@ test("dotted path lt filter returns matching rows", () => {
     status: { group: "pending", blocked: false },
   });
 
-  const results = orm.nested.findMany({
+  const results = orm.nested.O_findMany({
     where: { "pricing.total": { lt: 100 } },
   });
 
