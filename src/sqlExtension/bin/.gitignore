@@ -1,0 +1,2 @@
+# Keep bin dir but dont push em to gayhub
+/stmt_stats_ext*

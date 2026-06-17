@@ -21,6 +21,8 @@ import {
 } from "typebox";
 import type { ColumnCodec } from "./codec.ts";
 import type { GeneratedColumnConfig, DBValue } from "./types.ts";
+import { feature } from "bun:bundle";
+import { traceBegin, traceEnd } from "./tracing.ts";
 
 // ─── Column metadata ──────────────────────────────────────────────────────────
 
@@ -464,6 +466,7 @@ export function flattenRow(
   meta: TableMeta,
   codecs?: Map<string, ColumnCodec>
 ): Record<string, unknown> {
+  if (feature("DEBUG_TRACING")) traceBegin("schema.flattenRow");
   const row: Record<string, unknown> = {};
   if (!codecs?.size) {
     for (const col of meta.columns) {
@@ -481,6 +484,7 @@ export function flattenRow(
       row[col.name] = encoded;
     }
   }
+  if (feature("DEBUG_TRACING")) traceEnd();
   return row;
 }
 
@@ -493,6 +497,7 @@ export function flattenPatch(
   meta: TableMeta,
   codecs?: Map<string, ColumnCodec>
 ): Record<string, unknown> {
+  if (feature("DEBUG_TRACING")) traceBegin("schema.flattenPatch");
   const row: Record<string, unknown> = {};
   for (const col of meta.columns) {
     if (col.generated) continue;
@@ -509,6 +514,7 @@ export function flattenPatch(
     if (codec) encoded = codec.encode(encoded);
     row[col.name] = encoded;
   }
+  if (feature("DEBUG_TRACING")) traceEnd();
   return row;
 }
 
@@ -521,6 +527,8 @@ export function flattenSubRows(
   sub: SubTableMeta,
   codecs?: Map<string, ColumnCodec>
 ): Array<Record<string, unknown>> {
+  if (feature("DEBUG_TRACING")) traceBegin("schema.flattenSubRows");
+  try {
   if (sub.isScalar) {
     const result: Array<Record<string, unknown>> = new Array(items.length);
     for (let idx = 0; idx < items.length; idx++) {
@@ -573,6 +581,7 @@ export function flattenSubRows(
     }
   }
   return result;
+  } finally { if (feature("DEBUG_TRACING")) traceEnd(); }
 }
 
 export type SqliteScalar = string | number | boolean | null | bigint;
@@ -617,6 +626,7 @@ function hydrateRowFast(
   flat: Record<string, unknown>,
   meta: TableMeta
 ): Record<string, unknown> {
+  if (feature("DEBUG_TRACING")) traceBegin("schema.hydrateRowFast");
   const obj: Record<string, unknown> = {};
   for (const col of meta.columns) {
     const v = decodeValue(flat[col.name], col.sqlType, col.isBoolean);
@@ -630,6 +640,7 @@ function hydrateRowFast(
       obj[col.name] = v;
     }
   }
+  if (feature("DEBUG_TRACING")) traceEnd();
   return obj;
 }
 
@@ -641,8 +652,10 @@ export function hydrateRow(
   select?: string[],
   include?: string[]
 ): Record<string, unknown> {
+  if (feature("DEBUG_TRACING")) traceBegin("schema.hydrateRow");
   // Fast path: no codecs, no select, no subTables
   if (!codecs?.size && !select && !meta.subTables.length) {
+    if (feature("DEBUG_TRACING")) traceEnd();
     return hydrateRowFast(flat, meta);
   }
 
@@ -743,5 +756,6 @@ export function hydrateRow(
     }
   }
 
+  if (feature("DEBUG_TRACING")) traceEnd();
   return obj;
 }

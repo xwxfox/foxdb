@@ -13,6 +13,8 @@ import type { SQLQueryBindings } from "./database.ts";
 import type { FilterShape, WhereResult } from "./query-builder.ts";
 import { buildFilter, buildWhere, buildOrderBy, buildLimitOffset } from "./query-builder.ts";
 import type { TableMeta } from "./schema.ts";
+import { feature } from "bun:bundle";
+import { traceBegin, traceEnd } from "./tracing.ts";
 
 // ─── Condition node types ─────────────────────────────────────────────────────
 
@@ -122,6 +124,7 @@ export function buildWhereFromNodes(
   softDeleteColumn: string | undefined,
   meta: TableMeta | undefined
 ): WhereResult {
+  if (feature("DEBUG_TRACING")) traceBegin("fb.buildWhereFromNodes");
   const parts: Array<{ sql: string; params: SQLQueryBindings[] }> = [];
 
   if (softDeleteColumn) {
@@ -135,8 +138,12 @@ export function buildWhereFromNodes(
     }
   }
 
-  if (parts.length === 0) return { sql: "", params: [] };
+  if (parts.length === 0) {
+    if (feature("DEBUG_TRACING")) traceEnd();
+    return { sql: "", params: [] };
+  }
 
+  if (feature("DEBUG_TRACING")) traceEnd();
   return {
     sql: `WHERE ${parts.map((p) => p.sql).join(" AND ")}`,
     params: parts.flatMap((p) => p.params),

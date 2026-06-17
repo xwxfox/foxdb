@@ -43,6 +43,7 @@ import type { BunDatabase, SQLQueryBindings } from "./database.ts";
 import { QueryExecutor } from "./query-executor.ts";
 import type { EventBus } from "./events.ts";
 import { withTrace, raise, enterTrace, leaveTrace } from "./errors.ts";
+import { traceBegin, traceEnd } from "./tracing.ts";
 import {
   introspectTable,
   buildCreateTableSQL,
@@ -239,6 +240,7 @@ export class Repository<
     opts: FindOptions<TQuery>,
     operation: string
   ): Record<string, unknown>[] {
+    traceBegin("repo.fetchRows");
     const pk = this.descriptor.primaryKey.name;
     const softDeleteCol = this.descriptor.softDelete?.column;
 
@@ -252,20 +254,25 @@ export class Repository<
       Object.keys(opts.where).length > 0;
 
     if (!canTwoPhase) {
+      traceBegin("repo.fetchRows.singlePhase");
       const { sql, params } = buildSelect(
         this.tableName,
         opts,
         softDeleteCol,
         this.meta
       );
-      return this._executor.all<Record<string, unknown>>(
+      const result = this._executor.all<Record<string, unknown>>(
         sql,
         params,
         operation
       );
+      traceEnd();
+      traceEnd({ phase: "single", rows: result.length });
+      return result;
     }
 
     // Phase 1: fetch only PKs (covers index-only scans)
+    traceBegin("repo.fetchRows.phase1");
     const pkOpts: FindOptions<TQuery> = {
       ...opts,
       select: [pk] as [PK],
@@ -285,25 +292,34 @@ export class Repository<
     const pkValues = pkRows
       .map((r: Record<string, unknown>) => r[pk])
       .filter((v: unknown): v is string | number => typeof v === "string" || typeof v === "number");
+    traceEnd({ matched: pkValues.length });
 
-    if (pkValues.length === 0) return [];
+    if (pkValues.length === 0) {
+      traceEnd({ phase: "twoPhase", matched: 0 });
+      return [];
+    }
 
     // SQLite host parameter limit is 999; fallback if we exceed a safe threshold
     if (pkValues.length > 500) {
+      traceBegin("repo.fetchRows.fallbackSingle");
       const { sql, params } = buildSelect(
         this.tableName,
         opts,
         softDeleteCol,
         this.meta
       );
-      return this._executor.all<Record<string, unknown>>(
+      const result = this._executor.all<Record<string, unknown>>(
         sql,
         params,
         operation
       );
+      traceEnd();
+      traceEnd({ phase: "twoPhase_fallback", rows: result.length });
+      return result;
     }
 
     // Phase 2: fetch full rows for the matching PKs
+    traceBegin("repo.fetchRows.phase2");
     const ph = pkValues.map(() => "?").join(", ");
     const fullSql = `SELECT * FROM "${this.tableName}" WHERE "${pk}" IN (${ph})`;
     const rows = this._executor.all<Record<string, unknown>>(
@@ -321,7 +337,8 @@ export class Repository<
       const bi = pkOrder.get(bv as string | number) ?? 0;
       return ai - bi;
     });
-
+    traceEnd({ rows: rows.length });
+    traceEnd({ phase: "twoPhase", rows: rows.length });
     return rows;
   }
 
@@ -516,21 +533,30 @@ export class Repository<
    */
   insert(data: InsertData<TWrite>): Entity<Infer<TQuery>, Mat, TS> {
     return withTrace("repository.insert", { table: this.tableName }, () => {
+      traceBegin("repo.insert.parse");
       const parsed = this.parse(data);
       const obj = this._record(parsed);
+      traceEnd();
       const now = Date.now();
       if (this._timestampNames.createdAt) obj[this._timestampNames.createdAt] = now;
       if (this._timestampNames.updatedAt) obj[this._timestampNames.updatedAt] = now;
 
       this.db.transaction(() => {
-        // Main row
+        traceBegin("repo.insert.flatten");
         const flat = flattenRow(obj, this.meta, this._codecs);
+        traceEnd();
+
+        traceBegin("repo.insert.buildInsert");
         const { sql, params } = buildInsert(this.tableName, flat);
+        traceEnd();
+
+        traceBegin("repo.insert.execMain");
         this._executor.exec(sql, params, "insert");
+        traceEnd();
 
         const pkVal = obj[this.descriptor.primaryKey.name];
 
-        // Sub-table rows
+        traceBegin("repo.insert.subTables");
         for (const sub of this.meta.subTables) {
           const items = obj[sub.fieldName];
           if (!globalThis.Array.isArray(items) || items.length === 0) continue;
@@ -540,6 +566,7 @@ export class Repository<
             this._executor.exec(iSql, iParams, "insert");
           }
         }
+        traceEnd();
       });
 
       if (this.descriptor.eviction) {
@@ -565,6 +592,7 @@ export class Repository<
    */
   insertMany(records: InsertData<TWrite>[]): Entity<Infer<TQuery>, Mat, TS>[] {
     return withTrace("repository.insertMany", { table: this.tableName }, () => {
+      traceBegin("repo.insertMany.parse");
       const parsed = records.map((r) => this.parse(r));
       const objs = parsed.map((p) => {
         const obj = this._record(p);
@@ -573,14 +601,24 @@ export class Repository<
         if (this._timestampNames.updatedAt) obj[this._timestampNames.updatedAt] = now;
         return obj;
       });
+      traceEnd();
+
+      traceBegin("repo.insertMany.flatten");
       const flatRows = objs.map((obj) => flattenRow(obj, this.meta, this._codecs));
+      traceEnd();
 
       this.db.transaction(() => {
+        traceBegin("repo.insertMany.buildInsertMany");
         const batches = buildInsertMany(this.tableName, flatRows);
+        traceEnd();
+
+        traceBegin("repo.insertMany.execBatches");
         for (const { sql, params } of batches) {
           this._executor.exec(sql, params, "insertMany");
         }
-        // Sub-tables still insert individually per parent
+        traceEnd();
+
+        traceBegin("repo.insertMany.subTables");
         for (const obj of objs) {
           const pkVal = obj[this.descriptor.primaryKey.name];
           for (const sub of this.meta.subTables) {
@@ -593,6 +631,7 @@ export class Repository<
             }
           }
         }
+        traceEnd();
       });
 
       if (this.descriptor.eviction) {
@@ -821,6 +860,7 @@ export class Repository<
 
   /** Internal findById without event emission - used by update() */
   private _findByIdRaw(id: Infer<TQuery>[PK]): Entity<Infer<TQuery>, Mat, TS> | null {
+    traceBegin("repo.findByIdRaw.query");
     const pk = this.descriptor.primaryKey.name;
     const sql = this.descriptor.softDelete
       ? `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? AND "${this.descriptor.softDelete.column}" IS NULL LIMIT 1`
@@ -830,6 +870,7 @@ export class Repository<
       [id as string | number | bigint | null],
       "findById"
     );
+    traceEnd({ found: !!row });
     if (!row) return null;
 
     if (this.descriptor.eviction?.lruColumn && Math.random() < 0.1) {
@@ -870,8 +911,10 @@ export class Repository<
   O_findMany(opts?: FindOptions<TQuery>): Entity<Infer<TQuery>, Mat, TS>[];
   O_findMany(opts: FindOptions<TQuery> = {}): (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]> & TS)[] {
     return withTrace("repository.findMany", { table: this.tableName }, () => {
+      traceBegin("repo.findMany.fetchRows");
       const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk({ ...opts, select: opts.select }) : opts;
       const rows = this._fetchRows(resolvedOpts, "findMany");
+      traceEnd({ rows: rows.length });
 
 
       // Probabilistic LRU touch - batched into a single UPDATE
@@ -902,6 +945,7 @@ export class Repository<
       }
 
       // N+1-safe sub-table hydration
+      traceBegin("repo.findMany.prefetchSubs");
       const pk = this.descriptor.primaryKey.name;
       const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
 
@@ -910,6 +954,7 @@ export class Repository<
         const included = !opts.include || opts.include.some((name) => name === sub.fieldName);
         if (!included) continue;
         if (pkValues.length === 0) continue;
+        traceBegin(`repo.findMany.prefetch.${sub.fieldName}`);
         const ph = pkValues.map(() => "?").join(", ");
         const subRows = this._executor.all<Record<string, unknown>>(
           `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
@@ -924,8 +969,11 @@ export class Repository<
           byOwner.get(owner)!.push(r);
         }
         prefetchedBySub.set(sub.tableName, byOwner);
+        traceEnd({ subRows: subRows.length });
       }
+      traceEnd();
 
+      traceBegin("repo.findMany.hydrate");
       const results = rows.map((r) => {
         const rowPrefetched = new Map<string, Record<string, unknown>[]>();
         for (const sub of this.meta.subTables) {
@@ -938,6 +986,7 @@ export class Repository<
         }
         return this._wrap(this._hydrateOne(r, opts.include, opts.select, rowPrefetched));
       });
+      traceEnd();
       this._emit("findMany", { options: opts, result: results });
       return results;
     });
@@ -1243,13 +1292,17 @@ export class Repository<
    */
   O_count(where?: WhereClause<TQuery>): number {
     return withTrace("repository.count", { table: this.tableName }, () => {
+      traceBegin("repo.count.buildWhere");
       const { sql, params } = buildWhere(where, this.descriptor.softDelete?.column, this.meta);
+      traceEnd();
+      traceBegin("repo.count.exec");
       const fullSql = `SELECT COUNT(*) as "_count" FROM "${this.tableName}" ${sql}`.trim();
       const row = this._executor.get<{ _count: number }>(
         fullSql,
         params,
         "count"
       );
+      traceEnd();
       const result = (row ?? { _count: 0 })._count;
       this._emit("count", { where, result });
       return result;
@@ -1719,6 +1772,7 @@ export class Repository<
    */
   update(data: UpdateData<TWrite, PK>): Entity<Infer<TQuery>, Mat, TS> | null {
     return withTrace("repository.update", { table: this.tableName }, () => {
+      traceBegin("repo.update.extractPk");
       const obj = this._record(data as Infer<TWrite>);
       const pk = this.descriptor.primaryKey.name;
       const rawPk = obj[pk];
@@ -1728,11 +1782,14 @@ export class Repository<
           column: pk,
         });
       }
+      traceEnd();
 
-      // Fetch existing, merge, validate - use raw find to avoid spurious read events
+      traceBegin("repo.update.fetchExisting");
       const existing = this._findByIdRaw(this._assertPk(rawPk) as Infer<TQuery>[PK]);
+      traceEnd({ found: !!existing });
       if (!existing) return null;
 
+      traceBegin("repo.update.mergeAndFlatten");
       const merged = this.parse({ ...existing, ...data });
       const mergedObj = this._record(merged);
       if (this._timestampNames.updatedAt) {
@@ -1742,12 +1799,15 @@ export class Repository<
       const patch = Object.fromEntries(
         Object.entries(flat).filter(([k]) => k !== pk)
       );
+      traceEnd();
 
       this.db.transaction(() => {
+        traceBegin("repo.update.execMain");
         const { sql, params } = buildUpdate(this.tableName, pk, this._assertPk(rawPk), patch);
         this._executor.exec(sql, params, "update");
+        traceEnd();
 
-        // Re-sync sub-tables
+        traceBegin("repo.update.syncSubs");
         for (const sub of this.meta.subTables) {
           this._executor.exec(
             `DELETE FROM "${sub.tableName}" WHERE "_owner_id" = ?`,
@@ -1763,6 +1823,7 @@ export class Repository<
             this._executor.exec(iSql, iParams, "insert");
           }
         }
+        traceEnd();
       });
 
       const result = this._wrap(mergedObj);
@@ -1943,6 +2004,7 @@ export class Repository<
     select?: string[],
     prefetched?: Map<string, Record<string, unknown>[]>
   ): Record<string, unknown> {
+    traceBegin("repo.hydrateOne");
     const pk = this.descriptor.primaryKey.name;
     const pkVal = flat[pk];
 
@@ -1963,6 +2025,7 @@ export class Repository<
 
       if (prefetched && prefetched.has(sub.tableName)) {
         const rows = prefetched.get(sub.tableName)!;
+        traceBegin("repo.hydrateOne.cleanPrefetched");
         const cleaned = rows.map((r) => {
           const rest: Record<string, unknown> = {};
           for (const key of Object.keys(r)) {
@@ -1972,15 +2035,18 @@ export class Repository<
           }
           return hydrateRow(rest, subMeta, new Map(), this._codecs);
         });
+        traceEnd({ sub: sub.fieldName, rows: rows.length });
         subRows.set(sub.tableName, cleaned);
         continue;
       }
 
+      traceBegin("repo.hydrateOne.fetchSub");
       const rows = this._executor.all<Record<string, unknown>>(
         `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" = ? ORDER BY "_index" ASC`,
         [pkVal as string | number],
         "read"
       );
+      traceEnd({ sub: sub.fieldName, rows: rows.length });
 
       const cleaned = rows.map((r) => {
         const rest: Record<string, unknown> = {};
@@ -1995,7 +2061,9 @@ export class Repository<
       subRows.set(sub.tableName, cleaned);
     }
 
-    return hydrateRow(flat, this.meta, subRows, this._codecs, select, include);
+    const result = hydrateRow(flat, this.meta, subRows, this._codecs, select, include);
+    traceEnd();
+    return result;
   }
 
   // ─── Raw access ────────────────────────────────────────────────────────────
