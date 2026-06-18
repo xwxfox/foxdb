@@ -1,7 +1,7 @@
 import { feature } from "bun:bundle";
 import type { BunDatabase, SQLQueryBindings } from "./database.ts";
 import type { QueryMetrics } from "./types.ts";
-import { sqlDebug, traceBegin, traceEnd } from "./tracing.ts";
+import { sqlDebug, traceBegin, traceEnd, sqlFileWrite } from "./tracing.ts";
 
 export interface QueryExecutorOptions {
   db: BunDatabase;
@@ -55,7 +55,7 @@ function analyzeCost(planRows: any[], stmt: StmtStats, durationMs: number) {
     hints.push("Sorting requires temporary B-tree (ORDER BY cost)");
   }
 
-  // 3. Large IN clause (your case!)
+  // 3. Large IN clause
   if (planText.includes("IN (")) {
     score += 20;
     hints.push("Large IN clause may cause execution fanout");
@@ -144,39 +144,59 @@ export class QueryExecutor {
     params?: SQLQueryBindings[],
     operation = "raw"
   ): { changes: number; lastInsertRowid: number | bigint } {
-    const bindings = params ?? [];
-    const plan = this._debugQueryPlan(sql, bindings);
-    traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: bindings.length, plan });
+    if (feature("DEBUG_SQL_FILE")) sqlFileWrite(sql, params ?? []);
+    if (feature("DEBUG_TRACING")) {
+      const b = params ?? [];
+      const p = this._debugQueryPlan(sql, b);
+      traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: b.length, plan: p });
+      const s = performance.now();
+      const r = this._getStmt(sql).run(...b);
+      const d = performance.now() - s;
+      this._emit(operation, sql, d, r.changes);
+      traceEnd({ durMs: d, sql: sql.slice(0, 160), rowCount: r.changes });
+      return r;
+    }
     const start = performance.now();
-    const result = this._getStmt(sql).run(...bindings);
-    const durMs = performance.now() - start;
-    this._emit(operation, sql, durMs, result.changes);
-    traceEnd({ durMs, sql: sql.slice(0, 160), rowCount: result.changes, plan });
+    const result = this._getStmt(sql).run(...(params ?? []));
+    this._emit(operation, sql, performance.now() - start, result.changes);
     return result;
   }
 
   all<T>(sql: string, params?: SQLQueryBindings[], operation = "read"): T[] {
-    const bindings = params ?? [];
-    const plan = this._debugQueryPlan(sql, bindings);
-    traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: bindings.length, plan });
+    if (feature("DEBUG_SQL_FILE")) sqlFileWrite(sql, params ?? []);
+    if (feature("DEBUG_TRACING")) {
+      const b = params ?? [];
+      const p = this._debugQueryPlan(sql, b);
+      traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: b.length, plan: p });
+      const s = performance.now();
+      const rows = this._getStmt(sql).all(...b) as T[];
+      const d = performance.now() - s;
+      this._emit(operation, sql, d, rows.length);
+      traceEnd({ durMs: d, sql: sql.slice(0, 160), rowCount: rows.length });
+      return rows;
+    }
     const start = performance.now();
-    const rows = this._getStmt(sql).all(...bindings) as T[];
-    const durMs = performance.now() - start;
-    this._emit(operation, sql, durMs, rows.length);
-    traceEnd({ durMs, sql: sql.slice(0, 160), rowCount: rows.length, plan });
+    const rows = this._getStmt(sql).all(...(params ?? [])) as T[];
+    this._emit(operation, sql, performance.now() - start, rows.length);
     return rows;
   }
 
   get<T>(sql: string, params?: SQLQueryBindings[], operation = "read"): T | null {
-    const bindings = params ?? [];
-    const plan = this._debugQueryPlan(sql, bindings);
-    traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: bindings.length, plan });
+    if (feature("DEBUG_SQL_FILE")) sqlFileWrite(sql, params ?? []);
+    if (feature("DEBUG_TRACING")) {
+      const b = params ?? [];
+      const p = this._debugQueryPlan(sql, b);
+      traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: b.length, plan: p });
+      const s = performance.now();
+      const row = this._getStmt(sql).get(...b) as T | undefined;
+      const d = performance.now() - s;
+      this._emit(operation, sql, d, row ? 1 : 0);
+      traceEnd({ durMs: d, sql: sql.slice(0, 160), rowCount: row ? 1 : 0 });
+      return row ?? null;
+    }
     const start = performance.now();
-    const row = this._getStmt(sql).get(...bindings) as T | undefined;
-    const durMs = performance.now() - start;
-    const rowCount = row == null ? 0 : 1;
-    this._emit(operation, sql, durMs, rowCount);
-    traceEnd({ durMs, sql: sql.slice(0, 160), rowCount, plan });
+    const row = this._getStmt(sql).get(...(params ?? [])) as T | undefined;
+    this._emit(operation, sql, performance.now() - start, row ? 1 : 0);
     return row ?? null;
   }
 
@@ -185,20 +205,24 @@ export class QueryExecutor {
     params?: SQLQueryBindings[],
     operation = "read"
   ): Generator<T> {
-    const bindings = params ?? [];
-    const plan = this._debugQueryPlan(sql, bindings);
-    traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: bindings.length, plan });
-    const start = performance.now();
-    const iter = this._getStmt(sql)
-      .iterate(...bindings) as IterableIterator<T>;
-    let count = 0;
-    for (const row of iter) {
-      count++;
-      yield row;
+    if (feature("DEBUG_SQL_FILE")) sqlFileWrite(sql, params ?? []);
+    if (feature("DEBUG_TRACING")) {
+      const b = params ?? [];
+      const p = this._debugQueryPlan(sql, b);
+      traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: b.length, plan: p });
+      const s = performance.now();
+      const iter = this._getStmt(sql).iterate(...b) as IterableIterator<T>;
+      let c = 0;
+      for (const row of iter) { c++; yield row; }
+      const d = performance.now() - s;
+      traceEnd({ durMs: d, rowCount: c, sql: sql.slice(0, 160) });
+      return this._emit(operation, sql, d, c);
     }
-    const durMs = performance.now() - start;
-    traceEnd({ durMs, rowCount: count, sql: sql.slice(0, 160), plan });
-    this._emit(operation, sql, durMs, count);
+    const start = performance.now();
+    const iter = this._getStmt(sql).iterate(...(params ?? [])) as IterableIterator<T>;
+    let count = 0;
+    for (const row of iter) { count++; yield row; }
+    this._emit(operation, sql, performance.now() - start, count);
   }
 
   private _emit(

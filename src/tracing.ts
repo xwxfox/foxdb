@@ -111,14 +111,14 @@ class TraceSession {
 
     console.log("\n═══════════════════════════════════ TRACE SUMMARY ═══════════════════════════════════");
     console.log(`${"NAME".padEnd(52)} ${"COUNT".padStart(6)} ${"TOTAL_MS".padStart(10)} ${"AVG_US".padStart(10)} ${"P50_US".padStart(10)} ${"P95_US".padStart(10)} ${"P99_US".padStart(10)} ${"MAX_US".padStart(10)}`);
-    console.log("─".repeat(126));
+    console.log("-".repeat(126));
     for (const [name, g] of limited) {
       console.log(
         `${name.padEnd(52)} ${String(g.count).padStart(6)} ${(g.totalUs / 1000).toFixed(2).padStart(10)} ` +
         `${(g.totalUs / g.count).toFixed(2).padStart(10)} ${g.p50Us.toFixed(2).padStart(10)} ${g.p95Us.toFixed(2).padStart(10)} ${g.p99Us.toFixed(2).padStart(10)} ${g.maxUs.toFixed(2).padStart(10)}`
       );
     }
-    console.log("─".repeat(126));
+    console.log("-".repeat(126));
     const roots = this.getRoots(filter);
     console.log(`Root calls: ${roots.length}`);
     console.log(`Total spans: ${this._events.filter((e) => e.ph === "E").length}`);
@@ -132,11 +132,11 @@ class TraceSession {
     if (roots.length === 0) return;
     console.log("\n═══════════════════════════════════ TRACE ROOTS ═══════════════════════════════════");
     console.log(`${"ROOT".padStart(6)} ${"SPANS".padStart(6)} ${"TOTAL_MS".padStart(10)} ${"TOP_SPAN".padEnd(52)} ${"TOP_MS".padStart(10)} ${"FIRST_SPAN"}`);
-    console.log("─".repeat(104));
+    console.log("-".repeat(104));
     for (const r of roots) {
       console.log(`${String(r.rootId).padStart(6)} ${String(r.spans).padStart(6)} ${(r.totalUs / 1000).toFixed(2).padStart(10)} ${(r.topSpan ?? "").padEnd(52)} ${(r.topSpanUs / 1000).toFixed(2).padStart(10)} ${r.firstSpan ?? ""}`);
     }
-    console.log("─".repeat(104));
+    console.log("-".repeat(104));
     console.log("═══════════════════════════════════════════════════════════════════════\n");
   }
 
@@ -145,12 +145,12 @@ class TraceSession {
     if (events.length === 0) return;
     console.log(`\n════════════════════════ TRACE ROOT ${rootId} ════════════════════════`);
     console.log(`${"TIME_MS".padStart(10)} ${"DUR_MS".padStart(10)} ${"SPAN"}`);
-    console.log("─".repeat(80));
+    console.log("-".repeat(80));
     for (const e of events) {
       if (e.ph !== "E") continue;
       console.log(`${(e.ts / 1000).toFixed(3).padStart(10)} ${(e.dur! / 1000).toFixed(3).padStart(10)} ${e.name}`);
     }
-    console.log("─".repeat(80));
+    console.log("-".repeat(80));
     console.log("═══════════════════════════════════════════════════════════════════\n");
   }
 
@@ -240,6 +240,7 @@ export function printTraceRoot(rootId: number, filter: TraceFilter = {}) {
 
 export function resetTrace() {
   if (feature("DEBUG_TRACING")) (_tracer as TraceSession).reset();
+  if (feature("DEBUG_SQL_FILE")) sqlFileFlush();
 }
 
 export function getTraceEvents(filter: TraceFilter = {}) {
@@ -256,4 +257,59 @@ export function getTraceRoots(filter: TraceFilter = {}) {
 export function sqlDebug(message: string, data?: unknown) {
   if (feature("DEBUG_SQL_BUILDING")) console.log(`[SQL_BUILD] ${message}`);
   if (feature("DEBUG_SQL_BUILDING") && data != null) console.dir(data, { depth: 12, breakLength: 120, colors: true });
+}
+
+// --- SQL file output (DEBUG_SQL_FILE) -----------------------------------------
+
+let _sqlWriter: Bun.FileSink | null = null;
+let _sqlCurrentSection = "";
+
+function sqlFileEnsure() {
+  if (!_sqlWriter) {
+    try {
+      _sqlWriter = Bun.file("./foxdb-queries.sql").writer();
+    } catch { /* ignore */ }
+  }
+}
+
+export function sqlFileSection(section: string) {
+  if (!feature("DEBUG_SQL_FILE")) return;
+  sqlFileEnsure();
+  if (_sqlCurrentSection && _sqlWriter) {
+    _sqlWriter.write("\n");
+    _sqlWriter.flush();
+  }
+  _sqlCurrentSection = section;
+  if (_sqlWriter) {
+    _sqlWriter.write(`\n-- ====== ${section} ======\n\n`);
+    _sqlWriter.flush();
+  }
+}
+
+export function sqlFileWrite(sql: string, params?: unknown[]) {
+  if (!feature("DEBUG_SQL_FILE")) return;
+  sqlFileEnsure();
+  if (!_sqlWriter) return;
+  const trimmed = sql.trimEnd();
+  const line = params && params.length > 0
+    ? `-- params: ${JSON.stringify(params)}\n${trimmed};\n`
+    : `${trimmed};\n`;
+  _sqlWriter.write(line);
+  _sqlWriter.flush();
+}
+
+export function sqlFileFlush() {
+  if (!feature("DEBUG_SQL_FILE")) return;
+  if (_sqlWriter) {
+    try { _sqlWriter.flush(); } catch { /* ignore */ }
+  }
+}
+
+export function sqlFileClose() {
+  if (!feature("DEBUG_SQL_FILE")) return;
+  if (_sqlWriter) {
+    try { _sqlWriter.flush(); } catch { /* ignore */ }
+    try { _sqlWriter.end(); } catch { /* ignore */ }
+    _sqlWriter = null;
+  }
 }

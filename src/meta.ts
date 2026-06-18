@@ -9,7 +9,7 @@ import { Type, type Static, type TSchema } from "typebox";
 import { Compile, type Validator } from "typebox/schema";
 import { BunDatabase } from "./database.ts";
 
-// ─── Row schema ───────────────────────────────────────────────────────────────
+// --- Row schema ---------------------------------------------------------------
 
 const MetaRecordSchema = Type.Object({
   key: Type.String(),
@@ -22,7 +22,7 @@ const MetaCompiled = Compile(MetaRecordSchema);
 
 type MetaRecord = Static<typeof MetaRecordSchema>;
 
-// ─── Typed-accessor schemas ───────────────────────────────────────────────────
+// --- Typed-accessor schemas ---------------------------------------------------
 
 const SchemaHashSchema = Type.String();
 
@@ -55,13 +55,13 @@ type TablesList = Static<typeof TablesSchema>;
 type RelationsList = Static<typeof RelationsSchema>;
 type Version = Static<typeof VersionSchema>;
 
-// ─── Encoding constants ───────────────────────────────────────────────────────
+// --- Encoding constants -------------------------------------------------------
 
 const ENCODING_PLAIN = "plain";
 const ENCODING_JSON = "json";
 const ENCODING_DEFLATE_BASE64 = "deflate-base64";
 
-// ─── MetaStore ───────────────────────────────────────────────────────────────
+// --- MetaStore ---------------------------------------------------------------
 
 /** @category Database */
 export class MetaStore {
@@ -85,7 +85,7 @@ export class MetaStore {
     `);
   }
 
-  // ─── Core helpers ───────────────────────────────────────────────────────────
+  // --- Core helpers -----------------------------------------------------------
 
   private getRow(key: string): MetaRecord | null {
     const stmt = this.db.prepare(
@@ -145,7 +145,7 @@ export class MetaStore {
     this.setRow(key, JSON.stringify(value), ENCODING_JSON);
   }
 
-  // ─── String accessors ───────────────────────────────────────────────────────
+  // --- String accessors -------------------------------------------------------
 
   getString(key: string): string | null {
     const row = this.getRow(key);
@@ -157,7 +157,7 @@ export class MetaStore {
     this.setRow(key, value, ENCODING_PLAIN);
   }
 
-  // ─── JSON accessors ─────────────────────────────────────────────────────────
+  // --- JSON accessors ---------------------------------------------------------
 
   getJSON<T>(key: string): T | null {
     const row = this.getRow(key);
@@ -173,7 +173,7 @@ export class MetaStore {
     this.setRow(key, JSON.stringify(value), ENCODING_JSON);
   }
 
-  // ─── Compressed accessors ───────────────────────────────────────────────────
+  // --- Compressed accessors ---------------------------------------------------
 
   getCompressed(key: string): Uint8Array | null {
     const row = this.getRow(key);
@@ -190,14 +190,14 @@ export class MetaStore {
     this.setRow(key, encoded, ENCODING_DEFLATE_BASE64);
   }
 
-  // ─── Delete ─────────────────────────────────────────────────────────────────
+  // --- Delete -----------------------------------------------------------------
 
   delete(key: string): void {
     const stmt = this.db.prepare("DELETE FROM _foxdb_meta WHERE key = ?");
     stmt.run(key);
   }
 
-  // ─── Typed accessors ────────────────────────────────────────────────────────
+  // --- Typed accessors --------------------------------------------------------
 
   getSchemaHash(): SchemaHash | null {
     const row = this.getRow(MetaStore.KEY_SCHEMA_HASH);

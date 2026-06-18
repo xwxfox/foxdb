@@ -17,7 +17,7 @@ import {
 } from "typebox";
 import { createORM, table } from "./src/index.ts";
 
-// ─── 1. Schemas ───────────────────────────────────────────────────────────────
+// --- 1. Schemas ---------------------------------------------------------------
 
 const InventorySchema = Object({
     sku: String(),
@@ -52,7 +52,7 @@ const ActivitySchema = Object({
     level: String(),
 });
 
-// ─── 2. Create ORM with ALL the new bells & whistles ──────────────────────────
+// --- 2. Create ORM with ALL the new bells & whistles --------------------------
 
 const orm = createORM({
     path: "shop.db",
@@ -85,7 +85,7 @@ const orm = createORM({
             .to("inventory", "sku", { as: "inventory" }),
     ],
 
-    // ─── Lifecycle & QoL ────────────────────────────────────────────────────────
+    // --- Lifecycle & QoL --------------------------------------------------------
 
     /** Wipe everything on every run so the demo is repeatable */
     rebuildOnLaunch: true,
@@ -140,9 +140,9 @@ const orm = createORM({
 });
 
 
-// ─── 3. Event System Demo ─────────────────────────────────────────────────────
+// --- 3. Event System Demo -----------------------------------------------------
 
-console.log("\n─── Event System ───");
+console.log("\n--- Event System ---");
 
 // Fine-grained: listen to every insert on inventory
 const offInsert = orm._events.on("inventory", "insert", (e) => {
@@ -159,9 +159,9 @@ const offRead = orm._events.on("inventory", "read", (e) => {
     console.log(`[event:inventory.read] operation=${e.operation}`);
 });
 
-// ─── 4. CRUD + Sub-tables ─────────────────────────────────────────────────────
+// --- 4. CRUD + Sub-tables -----------------------------------------------------
 
-console.log("\n─── CRUD ───");
+console.log("\n--- CRUD ---");
 
 // Insert a sale with sub-table line items
 const sale = orm.sales.insert({
@@ -212,9 +212,9 @@ orm.inventory.upsert({
 });
 console.log("Upserted price:", orm.inventory.findById("WIDGET-A")?.price);
 
-// ─── 5. Materialization ───────────────────────────────────────────────────────
+// --- 5. Materialization -------------------------------------------------------
 
-console.log("\n─── Materialization ───");
+console.log("\n--- Materialization ---");
 
 const saleForMat = orm.sales.findById("SALE-001")!;
 const mat = saleForMat.materialize();
@@ -226,15 +226,15 @@ for (const li of mat.lineItems) {
 const all = orm.sales.findManyMaterialized();
 console.log("Batch materialized", all.length, "sales");
 
-// ─── 6. Serialization stays clean ─────────────────────────────────────────────
+// --- 6. Serialization stays clean ---------------------------------------------
 
-console.log("\n─── Serialization ───");
+console.log("\n--- Serialization ---");
 console.log("JSON has no .materialize or .related keys:");
 console.log(JSON.stringify(saleForMat, null, 2).slice(0, 200) + "...");
 
-// ─── 7. Transactions ──────────────────────────────────────────────────────────
+// --- 7. Transactions ----------------------------------------------------------
 
-console.log("\n─── Transaction ───");
+console.log("\n--- Transaction ---");
 orm._transaction(() => {
     orm.inventory.insert({ sku: "TX-1", name: "TxItem", price: 1, stock: 1, category: "tx", active: true });
     orm.sales.insert({
@@ -243,32 +243,32 @@ orm._transaction(() => {
 });
 console.log("Transaction committed - sales count:", orm.sales.count().exec());
 
-// ─── 8. Meta Access ───────────────────────────────────────────────────────────
+// --- 8. Meta Access -----------------------------------------------------------
 
-console.log("\n─── Meta ───");
+console.log("\n--- Meta ---");
 console.log("Schema hash:", orm._meta.schemaHash?.slice(0, 16) + "...");
 console.log("Tables:", orm._meta.tables?.join(", "));
 console.log("Version:", orm._meta.version);
 
-// ─── 9. Flush ─────────────────────────────────────────────────────────────────
+// --- 9. Flush -----------------------------------------------------------------
 
-console.log("\n─── Flush ───");
+console.log("\n--- Flush ---");
 console.log("Logs before flush:", orm.activity.count().exec());
 orm.activity.insert({ id: "L1", message: "hello", level: "debug" });
 console.log("Logs after insert:", orm.activity.count().exec());
 orm._flush(); // flushes ALL tables
 console.log("Logs after orm._flush():", orm.activity.count().exec());
 
-// ─── 10. Remove event listeners ───────────────────────────────────────────────
+// --- 10. Remove event listeners -----------------------------------------------
 
 offInsert();
 offWrite();
 offRead();
 console.log("\nEvent listeners removed.");
 
-// ─── 11. Cleanup ──────────────────────────────────────────────────────────────
+// --- 11. Cleanup --------------------------------------------------------------
 
-console.log("\n─── Closing ───");
+console.log("\n--- Closing ---");
 orm._close();
 console.log("Done - DB files unlinked because unlinkDbFilesOnExit: true");
 

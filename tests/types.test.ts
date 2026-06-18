@@ -16,7 +16,7 @@ const ItemSchema = Object({
   stock: Integer(),
 });
 
-// ─── Valid config ─────────────────────────────────────────────────────────────
+// --- Valid config -------------------------------------------------------------
 
 const valid = table(ItemSchema, (s) => ({
   primaryKey: s.sku,
@@ -25,18 +25,18 @@ const valid = table(ItemSchema, (s) => ({
 
 void valid;
 
-// ─── Invalid primaryKey should error at property access ───────────────────────
+// --- Invalid primaryKey should error at property access -----------------------
 
 const cols = createColumnProxy(ItemSchema);
 // @ts-expect-error - "nonExistent" is not a scalar column
 void cols.nonExistent;
 
-// ─── Invalid index column should error at property access ─────────────────────
+// --- Invalid index column should error at property access ---------------------
 
 // @ts-expect-error - "nonExistent" is not a scalar column
 void cols.nonExistent;
 
-// ─── Sub-table in index should error ──────────────────────────────────────────
+// --- Sub-table in index should error ------------------------------------------
 
 const WithSub = Object({
   id: String(),
@@ -47,7 +47,7 @@ const subCols = createColumnProxy(WithSub);
 // @ts-expect-error - tags is an array (sub-table), not a scalar
 void subCols.tags;
 
-// ─── select projection narrows return type ────────────────────────────────────
+// --- select projection narrows return type ------------------------------------
 
 function _compileTimeChecks() {
   const UserSchema = Object({ id: String(), name: String(), age: Number() });
@@ -58,7 +58,7 @@ function _compileTimeChecks() {
   // @ts-expect-error - name was not selected
   void projected[0].name;
 
-  // ─── select + include preserves sub-table types ───────────────────────────────
+  // --- select + include preserves sub-table types -------------------------------
 
   const OrderSchema = Object({
     id: String(),
@@ -80,14 +80,14 @@ function _compileTimeChecks() {
 
   orderOrm._close();
 
-  // ─── iterate yields entities ──────────────────────────────────────────────────
+  // --- iterate yields entities --------------------------------------------------
 
   for (const u of orm.users.O_iterate()) {
     const _id: string = u.id;
     void _id;
   }
 
-  // ─── aggregate returns dynamic shape ──────────────────────────────────────────
+  // --- aggregate returns dynamic shape ------------------------------------------
 
   const agg = orm.users.O_aggregate({ aggregations: { total: { sum: "age" } } });
   // @ts-expect-error - wrong aggregation alias
@@ -95,7 +95,7 @@ function _compileTimeChecks() {
 
   orm._close();
 
-  // ─── JSON path dotted paths are accepted in where clauses ─────────────────────
+  // --- JSON path dotted paths are accepted in where clauses ---------------------
 
   const NestedSchema = Object({
     id: Number(),
@@ -118,7 +118,7 @@ function _compileTimeChecks() {
 
   nestedOrm._close();
 
-  // ─── Depth-2 JSON path dotted paths are accepted in where clauses ─────────────
+  // --- Depth-2 JSON path dotted paths are accepted in where clauses -------------
 
   const Depth2Schema = Object({
     id: Number(),

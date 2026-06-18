@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-// ─── Template ─────────────────────────────────────────────────────────────────
+// --- Template -----------------------------------------------------------------
 
 function migrationTemplate(name: string, date: string): string {
   return `import type { Migration } from "@xwxfox/foxdb";
@@ -22,7 +22,7 @@ export default {
 `;
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// --- Public API ---------------------------------------------------------------
 
 /** @category Migration */
 export function createMigration(name: string, migrationsDir: string): string {

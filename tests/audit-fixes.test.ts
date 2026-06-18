@@ -8,7 +8,7 @@ import { Object, String, Number, Integer, Optional, Array } from "typebox";
 import { createORM, table } from "../src/index.ts";
 import { TableScheduler } from "../src/scheduler.ts";
 
-// ─── Issue 1: findMany with select + include must include PK implicitly ───────
+// --- Issue 1: findMany with select + include must include PK implicitly -------
 
 const SaleSchema = Object({
   id: String(),
@@ -32,7 +32,7 @@ describe("issue 1: select + include implicitly includes PK", () => {
   });
 });
 
-// ─── Issue 2: iterate() with include is now supported ─────────────────────────
+// --- Issue 2: iterate() with include is now supported -------------------------
 
 describe("issue 2: iterate with include works", () => {
   test("iterate() hydrates sub-tables in windows", () => {
@@ -51,7 +51,7 @@ describe("issue 2: iterate with include works", () => {
   });
 });
 
-// ─── Issue 3: BatchWriter must validate, apply codecs, timestamps, events ─────
+// --- Issue 3: BatchWriter must validate, apply codecs, timestamps, events -----
 
 const LogSchema = Object({ id: String(), payload: String(), createdAt: Optional(Number()), updatedAt: Optional(Number()) });
 
@@ -82,7 +82,7 @@ describe("issue 3: batch writer validates and applies codecs/timestamps", () => 
   });
 });
 
-// ─── Issue 4: aggregate must respect soft deletes ─────────────────────────────
+// --- Issue 4: aggregate must respect soft deletes -----------------------------
 
 const OrderSchema = Object({ id: String(), total: Number(), deletedAt: Optional(Integer()) });
 
@@ -125,7 +125,7 @@ describe("issue 4: aggregate respects soft deletes", () => {
   });
 });
 
-// ─── Issue 5: TableScheduler.clear(name) must stop timers ─────────────────────
+// --- Issue 5: TableScheduler.clear(name) must stop timers ---------------------
 
 describe("issue 5: scheduler clear stops timers", () => {
   test("clear(name) stops the specific timer", async () => {
@@ -148,7 +148,7 @@ describe("issue 5: scheduler clear stops timers", () => {
   });
 });
 
-// ─── Issue 6: deleteWhere must not hard-delete sub-rows under soft delete ─────
+// --- Issue 6: deleteWhere must not hard-delete sub-rows under soft delete -----
 
 const ParentSchema = Object({
   id: String(),
@@ -180,7 +180,7 @@ describe("issue 6: soft delete does not cascade to sub-tables", () => {
   });
 });
 
-// ─── Issue 7: maxRows without lruColumn warns ─────────────────────────────────
+// --- Issue 7: maxRows without lruColumn warns ---------------------------------
 
 describe("issue 7: maxRows without lruColumn warns", () => {
   test("console.warn is emitted", () => {
@@ -204,7 +204,7 @@ describe("issue 7: maxRows without lruColumn warns", () => {
   });
 });
 
-// ─── Issue 8: upsert must reactivate soft-deleted rows ────────────────────────
+// --- Issue 8: upsert must reactivate soft-deleted rows ------------------------
 
 describe("issue 8: upsert reactivates soft-deleted rows", () => {
   test("upsert on soft-deleted row clears deletedAt", () => {
@@ -229,7 +229,7 @@ describe("issue 8: upsert reactivates soft-deleted rows", () => {
   });
 });
 
-// ─── Issue 10: compressed columns get BLOB DDL ────────────────────────────────
+// --- Issue 10: compressed columns get BLOB DDL --------------------------------
 
 describe("issue 10: compressed columns use BLOB DDL", () => {
   test("meta column sqlType is BLOB for gzip-compressed columns", () => {

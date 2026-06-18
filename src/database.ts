@@ -10,7 +10,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import { join } from "path"
 
 import { feature } from "bun:bundle"
-// ─── Typed statement wrapper ──────────────────────────────────────────────────
+// --- Typed statement wrapper --------------------------------------------------
 
 /** Narrow re-export so callers don't need to import bun:sqlite themselves */
 export type { SQLQueryBindings };
@@ -21,7 +21,7 @@ export type { SQLQueryBindings };
  */
 export type BunStatement = Statement;
 
-// ─── Pragma defaults ──────────────────────────────────────────────────────────
+// --- Pragma defaults ----------------------------------------------------------
 
 /** @category Database */
 export interface DatabaseOptions {
@@ -55,7 +55,7 @@ export interface QueryPlanInfo {
   planMs: number;
 }
 
-// ─── foxdb Database ──────────────────────────────────────────────────────────
+// --- foxdb Database ----------------------------------------------------------
 
 /**
  * sqlite database with statement caching and pragma tuning
@@ -68,6 +68,9 @@ export class BunDatabase {
   /** scheduler for table maintenance tasks */
   readonly scheduler = new TableScheduler();
   private extensionStatus: "OK" | "NOT_NEEDED" | "WAITING" | "ERROR" = feature("DEBUG_SQL_BUILDING") ? "WAITING" : "NOT_NEEDED"
+
+  /** Tracks nesting depth of user-initiated transactions */
+  _txDepth = 0;
 
   constructor(opts: DatabaseOptions = {}) {
     const path = opts.path ?? ":memory:";

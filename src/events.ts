@@ -9,9 +9,9 @@ import type { TableDescriptor } from "./table.ts";
 /** @category Events */
 export type Listener = (payload: unknown) => void;
 
-// ─── Typed event map ──────────────────────────────────────────────────────────
+// --- Typed event map ----------------------------------------------------------
 
-// ─── Lifecycle event payloads (concrete, no remapping) ───────────────────────
+// --- Lifecycle event payloads (concrete, no remapping) -----------------------
 
 /**
  * lifecycle events emitted by the orm
@@ -47,7 +47,7 @@ export type ExtractEventPayload<
   ? LifecycleEventMap[K]
   : never;
 
-// ─── Public events interface ──────────────────────────────────────────────────
+// --- Public events interface --------------------------------------------------
 
 /**
  * typed event listener api

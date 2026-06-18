@@ -4,13 +4,11 @@
  * and exposes the materializer for eager loading.
  */
 
-import type { TObject, TSchema } from "typebox";
+import type { TSchema } from "typebox";
 import type {
   ScalarKeys,
-  TableConfig,
   RelationsConfig,
   Materialized,
-  Entity,
   MetaAccessors,
   TimestampShape,
   QuerySchema,
@@ -18,24 +16,24 @@ import type {
 } from "./types.ts";
 import type { TypedRelation } from "./typed-relation.ts";
 import { BunDatabase } from "./database.ts";
-import type { SQLQueryBindings } from "./database.ts";
 import { Repository } from "./repository.ts";
-import { introspectTable, convertGeneratedConfig } from "./schema.ts";
+import { introspectTable, buildColumns, convertGeneratedConfig } from "./schema.ts";
 import { createRelationBuilder, type RelationBuilder } from "./relations.ts";
 import { MetaStore } from "./meta.ts";
 import { inspectAllTables } from "./inspector.ts";
 import { computeDiff, type DesiredTable } from "./diff.ts";
 import { applySync } from "./sync.ts";
 import { migrate } from "./migrate.ts";
+import { sqlFileClose } from "./tracing.ts";
 import type { SyncPolicy, ErrorPolicy, UnlinkPolicy, QueryMetricsHook } from "./types.ts";
 import { EventBus, type ORMEvents } from "./events.ts";
 import { LifecycleManager } from "./lifecycle.ts";
 import type { ORMContext, LifecycleHook } from "./lifecycle.ts";
-import { handleError, ORMError, raise, currentTrace } from "./errors.ts";
+import { ORMError, raise, currentTrace } from "./errors.ts";
 import { unlinkDbFiles } from "./database.ts";
 import type { TableDescriptor } from "./table.ts";
 
-// ─── Options ──────────────────────────────────────────────────────────────────
+// --- Options ------------------------------------------------------------------
 
 /**
  * Base options for opening a SQLite database.
@@ -96,7 +94,7 @@ export interface CreateORMOptions<
   /** migration directory */
   migrations?: { dir: string };
 
-  // ─── Lifecycle & QoL ────────────────────────────────────────────────────────
+  // --- Lifecycle & QoL --------------------------------------------------------
   /** runs before schema validation */
   onStart?: LifecycleHook<T, Rels>;
   /** runs after the db is fully ready */
@@ -131,7 +129,7 @@ export interface CreateORMOptions<
   hooks?: QueryMetricsHook;
 }
 
-// ─── ORM return type ──────────────────────────────────────────────────────────
+// --- ORM return type ----------------------------------------------------------
 
 /**
  * The ORM object returned by `createORM`.
@@ -153,7 +151,7 @@ export interface CreateORMOptions<
  *   },
  * });
  *
- * // ─── Every table key is a Repository ───
+ * // --- Every table key is a Repository ---
  *
  * // Insert
  * orm.users.insert({ id: "u1", name: "alice" });
@@ -172,7 +170,7 @@ export interface CreateORMOptions<
  * orm.users.deleteById("u1");
  * orm.users.deleteWhere({ status: { eq: "banned" } });
  *
- * // ─── Framework methods (prefixed with _) ───
+ * // --- Framework methods (prefixed with _) ---
  *
  * orm._transaction(() => {
  *   orm.users.insert({ id: "t1", name: "txn" });
@@ -227,7 +225,7 @@ export type foxdb<
   _events: ORMEvents<Tables>;
 };
 
-// ─── Factory ──────────────────────────────────────────────────────────────────
+// --- Factory ------------------------------------------------------------------
 
 /** create a typed orm instance backed by sqlite */
 export function createORM<
@@ -258,12 +256,13 @@ export function createORM<
     const repos = new Map<string, Repository<any, any, any, any>>();
 
     for (const [name, config] of tableEntries) {
-      const meta = introspectTable(
-        name,
-        config.schema,
-        convertGeneratedConfig(config.generated)
-      );
-      const colNames = new Set(meta.columns.map((c) => c.name));
+      const columns = buildColumns(config.schema.properties, [], 0, true);
+      const colNames = new Set(columns.map((c) => c.name));
+      // Include generated column names in the validation set
+      const generated = convertGeneratedConfig(config.generated);
+      if (generated) {
+        for (const g of generated) colNames.add(g.name);
+      }
 
       // Validate primaryKey
       const pkName = config.primaryKey.name;
@@ -293,7 +292,7 @@ export function createORM<
     }
 
     // Wire EventBus into repositories
-    for (const [name, repo] of repos) {
+    for (const [_name, repo] of repos) {
       repo.setEventBus(events);
     }
 
@@ -406,7 +405,7 @@ export function createORM<
       }
     }
 
-    // ─── Build desired schema for diffing ───────────────────────────────────────
+    // --- Build desired schema for diffing ---------------------------------------
 
     const desiredTables: DesiredTable[] = [];
     for (const [name, config] of tableEntries) {
@@ -439,7 +438,7 @@ export function createORM<
       }
     }
 
-    // ─── Persist metadata ───────────────────────────────────────────────────────
+    // --- Persist metadata -------------------------------------------------------
 
     const meta = new MetaStore(db);
 
@@ -466,7 +465,7 @@ export function createORM<
     meta.setJSON("_relations", relations);
     meta.setString("_foxdb_version", "0.0.2");
 
-    // ─── Build and inject materializers ─────────────────────────────────────────
+    // --- Build and inject materializers -----------------------------------------
 
     function materialize(
       ownerTable: string,
@@ -480,7 +479,7 @@ export function createORM<
         result[k] = v;
       }
 
-      // ── Scalar relations (lazy) ───────────────────────────────────────────────
+      // -- Scalar relations (lazy) -----------------------------------------------
       const scalarRels = tableRels.filter((r) => r.kind === "scalar");
       if (scalarRels.length > 0) {
         const related = new Proxy(
@@ -523,7 +522,7 @@ export function createORM<
         }
       }
 
-      // ── Sub-table relations (batch per materialize call) ──────────────────────
+      // -- Sub-table relations (batch per materialize call) ----------------------
       const subTableRels = tableRels.filter((r) => r.kind === "subTable");
       for (const rel of subTableRels) {
         const [subField, fkField] = rel.ownerField.split(".") as [string, string];
@@ -750,7 +749,7 @@ export function createORM<
       return results;
     }
 
-    // ─── Metadata helpers ───────────────────────────────────────────────────────
+    // --- Metadata helpers -------------------------------------------------------
 
     function flush(opts?: { includeMeta?: boolean }): void {
       for (const repo of repos.values()) {
@@ -763,7 +762,7 @@ export function createORM<
       }
     }
 
-    // ─── Typed meta accessors ───────────────────────────────────────────────────
+    // --- Typed meta accessors ---------------------------------------------------
 
     const metaAccessors: MetaAccessors = {
       get schemaHash() {
@@ -784,7 +783,7 @@ export function createORM<
       },
     };
 
-    // ─── Inject materializers into repositories ─────────────────────────────────
+    // --- Inject materializers into repositories ---------------------------------
 
     for (const [name, repo] of repos) {
       const tableRels = relations.filter((r) => r.ownerTable === name);
@@ -796,7 +795,7 @@ export function createORM<
       );
     }
 
-    // ─── Build accessor object with getters ─────────────────────────────────────
+    // --- Build accessor object with getters -------------------------------------
 
     accessors = Object.create(null);
 
@@ -876,6 +875,7 @@ export function createORM<
         }
       }
 
+      sqlFileClose();
       db.close();
 
       lifecycle.runExit(ctx);
@@ -907,8 +907,16 @@ export function createORM<
     }
 
     // Assign public API before lifecycle hooks so ctx.orm._meta etc. are available
+    const tx = db.transaction.bind(db);
     Object.assign(accessors, {
-      _transaction: db.transaction.bind(db),
+      _transaction: ((fn: () => any): any => {
+        db._txDepth++;
+        try {
+          return tx(fn);
+        } finally {
+          db._txDepth--;
+        }
+      }) as typeof tx,
       _close: close,
       _setBulkLoadMode(enabled: boolean): void {
         db.setSynchronous(enabled ? "OFF" : "NORMAL");

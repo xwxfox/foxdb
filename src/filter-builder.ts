@@ -16,7 +16,7 @@ import type { TableMeta } from "./schema.ts";
 import { feature } from "bun:bundle";
 import { traceBegin, traceEnd } from "./tracing.ts";
 
-// ─── Condition node types ─────────────────────────────────────────────────────
+// --- Condition node types -----------------------------------------------------
 
 export type ConditionNode = {
   type: "condition";
@@ -41,7 +41,7 @@ export type ConditionNode = {
   children: ConditionNode[];
 };
 
-// ─── Internal builder state passed to executor ────────────────────────────────
+// --- Internal builder state passed to executor --------------------------------
 
 export interface InternalBuilderState {
   nodes: ConditionNode[];
@@ -62,7 +62,7 @@ export interface AggregateBuilderState {
   includeDeleted: boolean;
 }
 
-// ─── Convert ConditionNode tree to SQL ────────────────────────────────────────
+// --- Convert ConditionNode tree to SQL ----------------------------------------
 
 function buildNodeSql(
   node: ConditionNode,
@@ -150,7 +150,7 @@ export function buildWhereFromNodes(
   };
 }
 
-// ─── FilterBuilder ────────────────────────────────────────────────────────────
+// --- FilterBuilder ------------------------------------------------------------
 
 export class FilterBuilder<
   TQuery extends TSchema & { properties: Record<string, TSchema> },
@@ -191,7 +191,7 @@ export class FilterBuilder<
     };
   }
 
-  // ─── Equality operators ───────────────────────────────────────────────────
+  // --- Equality operators ---------------------------------------------------
 
   equals<P extends FilterableFields<TQuery>>(
     field: P,
@@ -209,7 +209,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Comparison operators ────────────────────────────────────────────────
+  // --- Comparison operators ------------------------------------------------
 
   greaterThan<P extends FilterableFields<TQuery>>(
     field: P,
@@ -243,7 +243,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Range ──────────────────────────────────────────────────────────────
+  // --- Range --------------------------------------------------------------
 
   between<P extends FilterableFields<TQuery>>(
     field: P,
@@ -258,7 +258,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── String pattern matching ────────────────────────────────────────────
+  // --- String pattern matching --------------------------------------------
 
   like<P extends FilterableFields<TQuery>>(
     field: P,
@@ -304,7 +304,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Set operators ──────────────────────────────────────────────────────
+  // --- Set operators ------------------------------------------------------
 
   in<P extends FilterableFields<TQuery>>(
     field: P,
@@ -322,7 +322,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Null operators ─────────────────────────────────────────────────────
+  // --- Null operators -----------------------------------------------------
 
   isNull<P extends FilterableFields<TQuery>>(field: P): this {
     this._nodes.push({ type: "condition", field, filter: { isNull: true } satisfies FilterShape });
@@ -338,7 +338,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Array operators ────────────────────────────────────────────────────
+  // --- Array operators ----------------------------------------------------
 
   arraySome<P extends ArrayFilterableFields<TQuery>>(
     field: P,
@@ -382,7 +382,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Stubbed future array methods ───────────────────────────────────────
+  // --- Stubbed future array methods ---------------------------------------
 
   arrayEvery<P extends ArrayFilterableFields<TQuery>>(
     _field: P,
@@ -424,7 +424,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Logical grouping ───────────────────────────────────────────────────
+  // --- Logical grouping ---------------------------------------------------
 
   and(callback: (q: FilterBuilder<TQuery, unknown>) => void): this {
     const child = new FilterBuilder<TQuery, unknown>();
@@ -460,14 +460,14 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Raw SQL ────────────────────────────────────────────────────────────
+  // --- Raw SQL ------------------------------------------------------------
 
   raw(sql: string, params: SQLQueryBindings[] = []): this {
     this._nodes.push({ type: "raw", sql, params });
     return this;
   }
 
-  // ─── Ordering ───────────────────────────────────────────────────────────
+  // --- Ordering -----------------------------------------------------------
 
   orderBy<P extends OrderableFields<TQuery>>(
     field: P,
@@ -485,7 +485,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Pagination ─────────────────────────────────────────────────────────
+  // --- Pagination ---------------------------------------------------------
 
   limit(n: number): this {
     this._limitValue = n;
@@ -497,7 +497,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Projection ─────────────────────────────────────────────────────────
+  // --- Projection ---------------------------------------------------------
 
   select<S extends SelectableKeys<TQuery>[]>(...fields: S): this {
     this._selectFields = fields;
@@ -509,7 +509,7 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Distinct ───────────────────────────────────────────────────────────
+  // --- Distinct -----------------------------------------------------------
 
   distinct(): this {
     this._distinctValue = true;
@@ -522,14 +522,14 @@ export class FilterBuilder<
     return this;
   }
 
-  // ─── Soft delete ────────────────────────────────────────────────────────
+  // --- Soft delete --------------------------------------------------------
 
   includeDeleted(): this {
     this._includeDeletedValue = true;
     return this;
   }
 
-  // ─── Execution ──────────────────────────────────────────────────────────
+  // --- Execution ----------------------------------------------------------
 
   exec(): TResult {
     return this._assertExecutor()(this._collectState());
@@ -553,7 +553,7 @@ export class FilterBuilder<
   }
 }
 
-// ─── AggregateBuilder ─────────────────────────────────────────────────────────
+// --- AggregateBuilder ---------------------------------------------------------
 
 export class AggregateBuilder<
   TQuery extends TSchema & { properties: Record<string, TSchema> }

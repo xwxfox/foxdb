@@ -16,7 +16,7 @@ import { raise } from "./errors.ts";
 import { feature } from "bun:bundle";
 import { sqlDebug, traceBegin, traceEnd } from "./tracing.ts";
 
-// ─── WHERE builder ────────────────────────────────────────────────────────────
+// --- WHERE builder ------------------------------------------------------------
 
 type FilterEntry = { sql: string; params: SQLQueryBindings[] };
 
@@ -49,6 +49,39 @@ function isFilterShape(value: unknown): value is FilterShape {
 
 function escapeSqlString(value: string): string {
   return value.replace(/'/g, "''");
+}
+
+/**
+ * Resolves a dotted column path that references a sub-table field.
+ * e.g. "SalesLineItems.ItemNumber" → subquery on sales__SalesLineItems
+ */
+function resolveSubTableColumn(
+  column: string,
+  meta?: TableMeta
+): { subTableName: string; subColumn: string; ownerPk: string } | null {
+  if (!meta) return null;
+  const parts = column.split(".");
+  if (parts.length < 2) return null;
+
+  const firstSegment = parts[0]!;
+  const sub = meta.subTables.find((s) => s.fieldName === firstSegment);
+  if (!sub) return null;
+
+  const remainingPath = parts.slice(1).join(".");
+  const subCol = sub.columnByPath.get(remainingPath);
+  if (!subCol && parts.length === 2) {
+    // Direct column access on sub-table, e.g. "SalesLineItems.ItemNumber"
+    // Check if the column exists by name
+    const directCol = sub.columnByName.get(remainingPath);
+    if (directCol) {
+      return { subTableName: sub.tableName, subColumn: directCol.name, ownerPk: meta.primaryKey! };
+    }
+    return null;
+  }
+  if (subCol) {
+    return { subTableName: sub.tableName, subColumn: subCol.name, ownerPk: meta.primaryKey! };
+  }
+  return null;
 }
 
 /**
@@ -101,6 +134,56 @@ function paramValue(v: unknown): SQLQueryBindings {
 export function buildFilter(column: string, filter: FilterShape, meta?: TableMeta): FilterEntry {
   if (feature("DEBUG_TRACING")) traceBegin("qb.buildFilter");
   sqlDebug(`buildFilter input`, { column, filter, tableName: meta?.tableName });
+
+  // Check if this is a sub-table column reference, e.g. "SalesLineItems.ItemNumber"
+  const subRef = column.indexOf(".") !== -1 ? resolveSubTableColumn(column, meta) : null;
+  if (subRef) {
+    sqlDebug(`buildFilter sub-table resolution`, { column, subTable: subRef.subTableName, subColumn: subRef.subColumn, ownerPk: subRef.ownerPk, reason: "dotted path references sub-table field → subquery" });
+    // Generate a subquery: pk IN (SELECT _owner_id FROM subTable WHERE subColumn OP value)
+    const innerParts: string[] = [];
+    const innerParams: SQLQueryBindings[] = [];
+    const subColRef = `"${subRef.subColumn}"`;
+
+    if ("eq" in filter) { innerParts.push(`${subColRef} = ?`); innerParams.push(paramValue(filter.eq)); }
+    if ("ne" in filter) { innerParts.push(`${subColRef} != ?`); innerParams.push(paramValue(filter.ne)); }
+    if ("gt" in filter) { innerParts.push(`${subColRef} > ?`); innerParams.push(paramValue(filter.gt)); }
+    if ("gte" in filter) { innerParts.push(`${subColRef} >= ?`); innerParams.push(paramValue(filter.gte)); }
+    if ("lt" in filter) { innerParts.push(`${subColRef} < ?`); innerParams.push(paramValue(filter.lt)); }
+    if ("lte" in filter) { innerParts.push(`${subColRef} <= ?`); innerParams.push(paramValue(filter.lte)); }
+    if ("like" in filter) { innerParts.push(`${subColRef} LIKE ?`); innerParams.push(paramValue(filter.like)); }
+    if ("between" in filter) {
+      const [lo, hi] = filter.between;
+      innerParts.push(`${subColRef} BETWEEN ? AND ?`);
+      innerParams.push(paramValue(lo), paramValue(hi));
+    }
+    if ("in" in filter) {
+      const vals = filter.in;
+      const ph = vals.map(() => "?").join(", ");
+      innerParts.push(`${subColRef} IN (${ph})`);
+      innerParams.push(...vals.map(paramValue));
+    }
+    if ("notIn" in filter) {
+      const vals = filter.notIn;
+      const ph = vals.map(() => "?").join(", ");
+      innerParts.push(`${subColRef} NOT IN (${ph})`);
+      innerParams.push(...vals.map(paramValue));
+    }
+    if ("isNull" in filter) { innerParts.push(`${subColRef} IS NULL`); }
+    if ("isNotNull" in filter) { innerParts.push(`${subColRef} IS NOT NULL`); }
+
+    if (innerParts.length > 0) {
+      const innerWhere = innerParts.join(" AND ");
+      const subquery = `EXISTS (SELECT 1 FROM "${subRef.subTableName}" WHERE "${subRef.subTableName}"."_owner_id" = "${meta!.tableName}"."${subRef.ownerPk}" AND ${innerWhere})`;
+      const result: FilterEntry = { sql: subquery, params: innerParams };
+      sqlDebug(`buildFilter sub-table result`, { column, result });
+      if (feature("DEBUG_TRACING")) traceEnd();
+      return result;
+    }
+    const emptyResult: FilterEntry = { sql: "1=0", params: [] };
+    if (feature("DEBUG_TRACING")) traceEnd();
+    return emptyResult;
+  }
+
   const jsonCol = resolveJsonColumn(column, meta);
   const colRef = jsonCol ? jsonCol.sql : `"${column}"`;
   sqlDebug(`buildFilter column resolution`, { column, colRef, flattened: Boolean(jsonCol), reason: jsonCol ? "matched flattened column or JSON_EXTRACT path" : "plain column" });
@@ -382,7 +465,7 @@ export function buildWhere<T extends TSchema & { properties: Record<string, TSch
   return result;
 }
 
-// ─── ORDER BY builder ─────────────────────────────────────────────────────────
+// --- ORDER BY builder ---------------------------------------------------------
 
 export function resolveOrderByColumn(column: string, meta: TableMeta | undefined): string {
   if (!meta) return `"${column}"`;
@@ -410,27 +493,27 @@ export function buildOrderBy<T extends TSchema & { properties: Record<string, TS
   if (feature("DEBUG_TRACING")) traceBegin("qb.buildOrderBy");
   sqlDebug(`buildOrderBy input`, { orderBy, tableName: meta?.tableName });
   try {
-  if (!orderBy) {
-    sqlDebug(`buildOrderBy output`, { sql: "" });
-    return "";
-  }
-  const clauses: OrderByClause<T>[] = globalThis.Array.isArray(orderBy) ? orderBy : [orderBy];
-  if (clauses.length === 0) {
-    sqlDebug(`buildOrderBy output`, { sql: "" });
-    return "";
-  }
-  const parts = clauses.map((o) => {
-    const colRef = resolveOrderByColumn(o.column, meta);
-    sqlDebug(`buildOrderBy column`, { column: o.column, colRef, direction: o.direction ?? "ASC" });
-    return `${colRef} ${o.direction ?? "ASC"}`;
-  });
-  const result = `ORDER BY ${parts.join(", ")}`;
-  sqlDebug(`buildOrderBy output`, { result });
-  return result;
+    if (!orderBy) {
+      sqlDebug(`buildOrderBy output`, { sql: "" });
+      return "";
+    }
+    const clauses: OrderByClause<T>[] = globalThis.Array.isArray(orderBy) ? orderBy : [orderBy];
+    if (clauses.length === 0) {
+      sqlDebug(`buildOrderBy output`, { sql: "" });
+      return "";
+    }
+    const parts = clauses.map((o) => {
+      const colRef = resolveOrderByColumn(o.column, meta);
+      sqlDebug(`buildOrderBy column`, { column: o.column, colRef, direction: o.direction ?? "ASC" });
+      return `${colRef} ${o.direction ?? "ASC"}`;
+    });
+    const result = `ORDER BY ${parts.join(", ")}`;
+    sqlDebug(`buildOrderBy output`, { result });
+    return result;
   } finally { if (feature("DEBUG_TRACING")) traceEnd(); }
 }
 
-// ─── LIMIT / OFFSET ───────────────────────────────────────────────────────────
+// --- LIMIT / OFFSET -----------------------------------------------------------
 
 export function buildLimitOffset(
   limit: number | undefined,
@@ -454,7 +537,7 @@ export function buildLimitOffset(
   return result;
 }
 
-// ─── Full SELECT builder ──────────────────────────────────────────────────────
+// --- Full SELECT builder ------------------------------------------------------
 
 export interface SelectResult {
   sql: string;
@@ -498,81 +581,81 @@ export function buildSelectSql<T extends TSchema & { properties: Record<string, 
   if (feature("DEBUG_TRACING")) traceBegin("qb.buildSelectSql");
   sqlDebug(`buildSelectSql input`, { tableName, opts, softDeleteColumn, metaColumns: meta?.columns.length, metaSubTables: meta?.subTables.length });
   try {
-  const { sql: whereSql, params: whereParams } = buildWhere(
-    opts.where,
-    opts.includeDeleted ? undefined : softDeleteColumn,
-    meta
-  );
-  const orderSql = buildOrderBy(opts.orderBy, meta);
-  const { sql: limitSql, params: limitParams } = buildLimitOffset(
-    opts.limit,
-    opts.offset
-  );
+    const { sql: whereSql, params: whereParams } = buildWhere(
+      opts.where,
+      opts.includeDeleted ? undefined : softDeleteColumn,
+      meta
+    );
+    const orderSql = buildOrderBy(opts.orderBy, meta);
+    const { sql: limitSql, params: limitParams } = buildLimitOffset(
+      opts.limit,
+      opts.offset
+    );
 
-  const selectCols = opts.select && meta
-    ? opts.select.flatMap((c) => resolveSelectColumn(c, meta)).join(", ")
-    : "*";
+    const selectCols = opts.select && meta
+      ? opts.select.flatMap((c) => resolveSelectColumn(c, meta)).join(", ")
+      : "*";
 
-  if (opts.distinctOn && opts.distinctOn.length > 0) {
-    const groupCols = opts.distinctOn.map((c) => resolveOrderByColumn(c, meta)).join(", ");
+    if (opts.distinctOn && opts.distinctOn.length > 0) {
+      const groupCols = opts.distinctOn.map((c) => resolveOrderByColumn(c, meta)).join(", ");
+      const clauses = [
+        `SELECT ${selectCols} FROM "${tableName}"`,
+        whereSql,
+        `GROUP BY ${groupCols}`,
+        orderSql,
+        limitSql,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const countClauses = [
+        `SELECT COUNT(*) as "_count" FROM (SELECT 1 FROM "${tableName}"`,
+        whereSql,
+        `GROUP BY ${groupCols})`,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const result = {
+        sql: clauses,
+        params: [...whereParams, ...limitParams],
+        countSql: countClauses,
+        countParams: whereParams,
+      };
+      sqlDebug(`buildSelectSql output`, { tableName, strategy: "distinctOn", result });
+      return result;
+    }
+
+    const distinctPrefix = opts.distinct ? "DISTINCT " : "";
     const clauses = [
-      `SELECT ${selectCols} FROM "${tableName}"`,
+      `SELECT ${distinctPrefix}${selectCols} FROM "${tableName}"`,
       whereSql,
-      `GROUP BY ${groupCols}`,
       orderSql,
       limitSql,
     ]
       .filter(Boolean)
       .join(" ");
-    const countClauses = [
-      `SELECT COUNT(*) as "_count" FROM (SELECT 1 FROM "${tableName}"`,
-      whereSql,
-      `GROUP BY ${groupCols})`,
-    ]
-      .filter(Boolean)
-      .join(" ");
+
+    let countClauses: string[];
+    if (opts.distinct) {
+      countClauses = [
+        `SELECT COUNT(*) as "_count" FROM (SELECT DISTINCT ${selectCols} FROM "${tableName}"`,
+        whereSql,
+        `)`,
+      ];
+    } else {
+      countClauses = [
+        `SELECT COUNT(*) as "_count" FROM "${tableName}"`,
+        whereSql,
+      ];
+    }
+
     const result = {
       sql: clauses,
       params: [...whereParams, ...limitParams],
-      countSql: countClauses,
+      countSql: countClauses.filter(Boolean).join(" "),
       countParams: whereParams,
     };
-    sqlDebug(`buildSelectSql output`, { tableName, strategy: "distinctOn", result });
+    sqlDebug(`buildSelectSql output`, { tableName, strategy: opts.distinct ? "distinct" : "normal", result });
     return result;
-  }
-
-  const distinctPrefix = opts.distinct ? "DISTINCT " : "";
-  const clauses = [
-    `SELECT ${distinctPrefix}${selectCols} FROM "${tableName}"`,
-    whereSql,
-    orderSql,
-    limitSql,
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  let countClauses: string[];
-  if (opts.distinct) {
-    countClauses = [
-      `SELECT COUNT(*) as "_count" FROM (SELECT DISTINCT ${selectCols} FROM "${tableName}"`,
-      whereSql,
-      `)`,
-    ];
-  } else {
-    countClauses = [
-      `SELECT COUNT(*) as "_count" FROM "${tableName}"`,
-      whereSql,
-    ];
-  }
-
-  const result = {
-    sql: clauses,
-    params: [...whereParams, ...limitParams],
-    countSql: countClauses.filter(Boolean).join(" "),
-    countParams: whereParams,
-  };
-  sqlDebug(`buildSelectSql output`, { tableName, strategy: opts.distinct ? "distinct" : "normal", result });
-  return result;
   } finally { if (feature("DEBUG_TRACING")) traceEnd(); }
 }
 
@@ -590,7 +673,7 @@ export function buildSelect<T extends TSchema & { properties: Record<string, TSc
   return result;
 }
 
-// ─── INSERT builder ───────────────────────────────────────────────────────────
+// --- INSERT builder -----------------------------------------------------------
 
 export function buildInsert(
   tableName: string,
@@ -613,42 +696,44 @@ export function buildInsert(
 export function buildInsertMany(
   tableName: string,
   rows: Record<string, unknown>[],
-  maxParams = 999
+  maxParams = 999,
+  colsSql?: string,
+  valueGroup?: string,
+  keys?: string[]
 ): Array<{ sql: string; params: SQLQueryBindings[] }> {
   if (feature("DEBUG_TRACING")) traceBegin("qb.buildInsertMany");
   sqlDebug(`buildInsertMany input`, { tableName, rowCount: rows.length, maxParams });
   try {
-  if (rows.length === 0) {
-    sqlDebug(`buildInsertMany output`, { batches: [] });
-    return [];
-  }
-  const first = rows[0]!;
-  const keys = Object.keys(first);
-  const colCount = keys.length;
-  const maxRowsPerStmt = Math.floor(maxParams / colCount);
-  if (maxRowsPerStmt <= 0) {
-    raise("TOO_MANY_COLUMNS", `foxdb: table "${tableName}" has too many columns for multi-value insert`);
-  }
-  sqlDebug(`buildInsertMany batching`, { keys, colCount, maxParams, maxRowsPerStmt });
-  const batches: Array<{ sql: string; params: SQLQueryBindings[] }> = [];
-  for (let i = 0; i < rows.length; i += maxRowsPerStmt) {
-    const batch = rows.slice(i, i + maxRowsPerStmt);
-    const cols = keys.map((k) => `"${k}"`).join(", ");
-    const valueGroups = batch.map(() => {
-      const ph = keys.map(() => "?").join(", ");
-      return `(${ph})`;
-    }).join(", ");
-    const params = batch.flatMap((row) => keys.map((k) => toBinding(row[k])));
-    const sql = `INSERT INTO "${tableName}" (${cols}) VALUES ${valueGroups}`;
-    sqlDebug(`buildInsertMany batch`, { start: i, rowCount: batch.length, sql, paramCount: params.length });
-    batches.push({ sql, params });
-  }
-  sqlDebug(`buildInsertMany output`, { batchCount: batches.length, batches });
-  return batches;
+    if (rows.length === 0) {
+      sqlDebug(`buildInsertMany output`, { batches: [] });
+      return [];
+    }
+    const ks = keys ?? Object.keys(rows[0]!);
+    const colCount = ks.length;
+    const maxRowsPerStmt = Math.floor(maxParams / colCount);
+    if (maxRowsPerStmt <= 0) {
+      raise("TOO_MANY_COLUMNS", `foxdb: table "${tableName}" has too many columns for multi-value insert`);
+    }
+    sqlDebug(`buildInsertMany batching`, { keys: ks, colCount, maxParams, maxRowsPerStmt });
+    const cols = colsSql ?? ks.map((k) => `"${k}"`).join(", ");
+    const vg = valueGroup ?? `(${ks.map(() => "?").join(", ")})`;
+    const batches: Array<{ sql: string; params: SQLQueryBindings[] }> = [];
+    for (let i = 0; i < rows.length; i += maxRowsPerStmt) {
+      const batch = rows.slice(i, i + maxRowsPerStmt);
+      const valueGroups = batch.map(() => vg).join(", ");
+      const params: SQLQueryBindings[] = keys
+        ? batch.flatMap((row) => ks.map((k) => row[k] as SQLQueryBindings))
+        : batch.flatMap((row) => ks.map((k) => toBinding(row[k])));
+      const sql = `INSERT INTO "${tableName}" (${cols}) VALUES ${valueGroups}`;
+      sqlDebug(`buildInsertMany batch`, { start: i, rowCount: batch.length, sql, paramCount: params.length });
+      batches.push({ sql, params });
+    }
+    sqlDebug(`buildInsertMany output`, { batchCount: batches.length, batches });
+    return batches;
   } finally { if (feature("DEBUG_TRACING")) traceEnd(); }
 }
 
-// ─── UPSERT (INSERT OR REPLACE / ON CONFLICT DO UPDATE) ──────────────────────
+// --- UPSERT (INSERT OR REPLACE / ON CONFLICT DO UPDATE) ----------------------
 
 export function buildUpsert(
   tableName: string,
@@ -714,7 +799,7 @@ export function buildUpsertMany(
   return batches;
 }
 
-// ─── UPDATE builder ───────────────────────────────────────────────────────────
+// --- UPDATE builder -----------------------------------------------------------
 
 export function buildUpdate<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
@@ -762,7 +847,7 @@ export function buildUpdateWhere<T extends TSchema & { properties: Record<string
   return result;
 }
 
-// ─── DELETE builder ───────────────────────────────────────────────────────────
+// --- DELETE builder -----------------------------------------------------------
 
 export function buildDelete<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,

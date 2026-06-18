@@ -13,7 +13,7 @@ import { createORM, table } from "../src/index.ts";
 
 import { LogEntryType, SaleSchema } from "./real-world-types";
 
-// ─── test factory ────────────────────────────────────────────────────────────
+// --- test factory ------------------------------------------------------------
 
 function makeORM() {
   return createORM({
@@ -212,7 +212,7 @@ function createFullSale(orderNumber: number): any {
   };
 }
 
-// ─── integration tests ───────────────────────────────────────────────────────
+// --- integration tests -------------------------------------------------------
 
 describe("real-world SaleSchema integration", () => {
   test("roundtrip: insert full sale and findById hydrates everything", () => {

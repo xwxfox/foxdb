@@ -7,7 +7,7 @@ import type { ColumnMeta } from "./schema.ts";
 import type { InspectorTable, InspectorColumn, InspectorIndex } from "./inspector.ts";
 import type { SchemaDiff, SchemaChange } from "./types.ts";
 
-// ─── Input types ──────────────────────────────────────────────────────────────
+// --- Input types --------------------------------------------------------------
 
 export interface DesiredTable {
   name: string;
@@ -16,7 +16,7 @@ export interface DesiredTable {
   primaryKey: string;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 function normalizeType(t: string): string {
   return t.toUpperCase().trim();
@@ -57,7 +57,7 @@ function getActualPkColumns(actual: InspectorTable): string[] {
     .map((c) => c.name);
 }
 
-// ─── Diff logic ───────────────────────────────────────────────────────────────
+// --- Diff logic ---------------------------------------------------------------
 
 /** @category Migration */
 export function computeDiff(desired: DesiredTable[], actual: InspectorTable[]): SchemaDiff {

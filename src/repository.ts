@@ -43,7 +43,7 @@ import type { BunDatabase, SQLQueryBindings } from "./database.ts";
 import { QueryExecutor } from "./query-executor.ts";
 import type { EventBus } from "./events.ts";
 import { withTrace, raise, enterTrace, leaveTrace } from "./errors.ts";
-import { traceBegin, traceEnd } from "./tracing.ts";
+import { traceBegin, traceEnd, sqlDebug, sqlFileWrite, sqlFileSection } from "./tracing.ts";
 import {
   introspectTable,
   buildCreateTableSQL,
@@ -97,7 +97,7 @@ function cursorValue(
   return null;
 }
 
-// ─── Repository ───────────────────────────────────────────────────────────────
+// --- Repository ---------------------------------------------------------------
 
 /**
  * Typed repository for a single table. Every entry in your `tables` config
@@ -164,6 +164,8 @@ export class Repository<
   private _events?: EventBus;
   private _executor: QueryExecutor;
   private readonly _codecs: Map<string, ColumnCodec>;
+  private readonly _insertColsSql: string;
+  private readonly _insertPlaceholders: string;
 
   /** @internal */
   setEventBus(bus: EventBus): void {
@@ -212,6 +214,10 @@ export class Repository<
         col.sqlType = "BLOB";
       }
     }
+
+    // Prebuild INSERT SQL template (columns never change per table)
+    this._insertColsSql = this.meta.insertColumnNames.map((k) => `"${k}"`).join(", ");
+    this._insertPlaceholders = this.meta.insertColumnNames.map(() => "?").join(", ");
 
     this._migrate();
 
@@ -299,23 +305,31 @@ export class Repository<
       return [];
     }
 
-    // SQLite host parameter limit is 999; fallback if we exceed a safe threshold
+    // SQLite host parameter limit is 999; batch phase 2 in groups of 500
     if (pkValues.length > 500) {
-      traceBegin("repo.fetchRows.fallbackSingle");
-      const { sql, params } = buildSelect(
-        this.tableName,
-        opts,
-        softDeleteCol,
-        this.meta
-      );
-      const result = this._executor.all<Record<string, unknown>>(
-        sql,
-        params,
-        operation
-      );
-      traceEnd();
-      traceEnd({ phase: "twoPhase_fallback", rows: result.length });
-      return result;
+      traceBegin("repo.fetchRows.phase2Batched");
+      const allRows: Record<string, unknown>[] = [];
+      for (let i = 0; i < pkValues.length; i += 500) {
+        const batch = pkValues.slice(i, i + 500);
+        const ph = batch.map(() => "?").join(", ");
+        const batchRows = this._executor.all<Record<string, unknown>>(
+          `SELECT * FROM "${this.tableName}" WHERE "${pk}" IN (${ph})`,
+          batch,
+          operation
+        );
+        for (const r of batchRows) allRows.push(r);
+      }
+      const pkOrder = new Map(pkValues.map((v, i) => [v, i]));
+      allRows.sort((a, b) => {
+        const av = a[pk];
+        const bv = b[pk];
+        const ai = pkOrder.get(av as string | number) ?? 0;
+        const bi = pkOrder.get(bv as string | number) ?? 0;
+        return ai - bi;
+      });
+      traceEnd({ rows: allRows.length });
+      traceEnd({ phase: "twoPhase_batched", rows: allRows.length });
+      return allRows;
     }
 
     // Phase 2: fetch full rows for the matching PKs
@@ -373,7 +387,7 @@ export class Repository<
 
   /** Narrow a parsed schema value to a plain record for dynamic property access */
   private _record(value: Infer<TWrite>): Record<string, unknown> {
-    return Object.fromEntries(Object.entries(value));
+    return value;
   }
 
   /** Validate that a value is a valid SQLite scalar for use as a primary key */
@@ -424,31 +438,55 @@ export class Repository<
     }
   }
 
-  // ─── Migration ─────────────────────────────────────────────────────────────
+  // --- Migration -------------------------------------------------------------
 
   private _migrate(): void {
     const pk = this.descriptor.primaryKey.name;
-    const stmts = buildCreateTableSQL(this.meta, pk);
+    const configIndexes = this.descriptor.indexes ?? [];
+    sqlFileSection(`DDL: ${this.tableName}`);
+    sqlDebug(`ddl.migrate starting for table ${this.tableName}`, {
+      primaryKey: pk,
+      totalDDLStatements: "(computed by buildCreateTableSQL)",
+      userIndexes: configIndexes.length,
+      userIndexDetails: configIndexes.map((idx) => ({
+        columns: idx.columns.map((c) => c.name),
+        unique: idx.unique ?? false,
+        name: idx.name,
+        where: idx.where,
+      })),
+      subTables: this.meta.subTables.map((s) => ({ fieldName: s.fieldName, tableName: s.tableName, isScalar: s.isScalar })),
+    });
+    const stmts = buildCreateTableSQL(this.meta, pk, this.descriptor.autoIndex ?? true);
+    sqlDebug(`ddl.migrate DDL statements count`, { count: stmts.length + configIndexes.length });
     this.db.transaction(() => {
-      for (const sql of stmts) this.db.exec(sql);
+      for (const sql of stmts) {
+        sqlFileWrite(sql);
+        this.db.exec(sql);
+      }
 
-      for (const idx of this.descriptor.indexes ?? []) {
-        this.db.exec(
-          buildIndexSQL(
-            this.tableName,
-            idx.columns.map((c) => c.name),
-            idx.unique ?? false,
-            idx.name,
-            idx.where,
-            idx.include?.map((c) => c.name)
-          )
+      for (const idx of configIndexes) {
+        const idxSql = buildIndexSQL(
+          this.tableName,
+          idx.columns.map((c) => c.name),
+          idx.unique ?? false,
+          idx.name,
+          idx.where,
+          idx.include?.map((c) => c.name)
         );
+        sqlFileWrite(idxSql);
+        sqlDebug(`ddl.userIndex for ${this.tableName}`, {
+          sql: idxSql,
+          columns: idx.columns.map((c) => c.name),
+          unique: idx.unique ?? false,
+          where: idx.where,
+          reason: "user-configured index in table() descriptor",
+        });
+        this.db.exec(idxSql);
       }
     });
-    this.db.clearCache();
   }
 
-  // ─── Eviction ──────────────────────────────────────────────────────────────
+  // --- Eviction --------------------------------------------------------------
 
   private _runEviction(): void {
     const ev = this.descriptor.eviction;
@@ -482,7 +520,7 @@ export class Repository<
     }
   }
 
-  // ─── Validation ────────────────────────────────────────────────────────────
+  // --- Validation ------------------------------------------------------------
 
   /**
    * Validate and coerce data against the schema. Throws on invalid input.
@@ -515,7 +553,7 @@ export class Repository<
     return this.validator.Check(data);
   }
 
-  // ─── Insert ────────────────────────────────────────────────────────────────
+  // --- Insert ----------------------------------------------------------------
 
   /**
    * Insert a single record. Returns the inserted entity.
@@ -541,17 +579,18 @@ export class Repository<
       if (this._timestampNames.createdAt) obj[this._timestampNames.createdAt] = now;
       if (this._timestampNames.updatedAt) obj[this._timestampNames.updatedAt] = now;
 
-      this.db.transaction(() => {
+      const doInsert = () => {
         traceBegin("repo.insert.flatten");
         const flat = flattenRow(obj, this.meta, this._codecs);
         traceEnd();
 
-        traceBegin("repo.insert.buildInsert");
-        const { sql, params } = buildInsert(this.tableName, flat);
-        traceEnd();
-
         traceBegin("repo.insert.execMain");
-        this._executor.exec(sql, params, "insert");
+        const params = this.meta.insertColumnNames.map((k) => flat[k] as SQLQueryBindings);
+        this._executor.exec(
+          `INSERT INTO "${this.tableName}" (${this._insertColsSql}) VALUES (${this._insertPlaceholders})`,
+          params,
+          "insert"
+        );
         traceEnd();
 
         const pkVal = obj[this.descriptor.primaryKey.name];
@@ -561,13 +600,21 @@ export class Repository<
           const items = obj[sub.fieldName];
           if (!globalThis.Array.isArray(items) || items.length === 0) continue;
           const rows = flattenSubRows(this._assertPk(pkVal), items, sub, this._codecs);
-          for (const row of rows) {
-            const { sql: iSql, params: iParams } = buildInsert(sub.tableName, row);
-            this._executor.exec(iSql, iParams, "insert");
+          if (rows.length > 0) {
+            const batches = buildInsertMany(sub.tableName, rows, 999, sub.insertColsSql, sub.insertValueGroup, sub.insertColumnNames);
+            for (const { sql, params: iParams } of batches) {
+              this._executor.exec(sql, iParams, "insert");
+            }
           }
         }
         traceEnd();
-      });
+      };
+
+      if (this.db._txDepth > 0) {
+        doInsert();
+      } else {
+        this.db.transaction(doInsert);
+      }
 
       if (this.descriptor.eviction) {
         this._runEviction();
@@ -619,15 +666,19 @@ export class Repository<
         traceEnd();
 
         traceBegin("repo.insertMany.subTables");
-        for (const obj of objs) {
-          const pkVal = obj[this.descriptor.primaryKey.name];
-          for (const sub of this.meta.subTables) {
+        for (const sub of this.meta.subTables) {
+          const allSubRows: Record<string, unknown>[] = [];
+          for (const obj of objs) {
+            const pkVal = obj[this.descriptor.primaryKey.name];
             const items = obj[sub.fieldName];
             if (!globalThis.Array.isArray(items) || items.length === 0) continue;
             const rows = flattenSubRows(this._assertPk(pkVal), items, sub, this._codecs);
-            for (const row of rows) {
-              const { sql: iSql, params: iParams } = buildInsert(sub.tableName, row);
-              this._executor.exec(iSql, iParams, "insertMany");
+            for (const row of rows) allSubRows.push(row);
+          }
+          if (allSubRows.length > 0) {
+            const subBatches = buildInsertMany(sub.tableName, allSubRows, 999, sub.insertColsSql, sub.insertValueGroup, sub.insertColumnNames);
+            for (const { sql, params } of subBatches) {
+              this._executor.exec(sql, params, "insertMany");
             }
           }
         }
@@ -674,7 +725,7 @@ export class Repository<
     });
   }
 
-  // ─── Upsert ────────────────────────────────────────────────────────────────
+  // --- Upsert ----------------------------------------------------------------
 
   /**
    * Insert or update on conflict. If the record exists (by conflict target),
@@ -738,9 +789,11 @@ export class Repository<
           const items = obj[sub.fieldName];
           if (!globalThis.Array.isArray(items) || items.length === 0) continue;
           const rows = flattenSubRows(this._assertPk(pkVal), items, sub, this._codecs);
-          for (const row of rows) {
-            const { sql: iSql, params: iParams } = buildInsert(sub.tableName, row);
-            this._executor.exec(iSql, iParams, "insert");
+          if (rows.length > 0) {
+            const subBatches = buildInsertMany(sub.tableName, rows, 999, sub.insertColsSql, sub.insertValueGroup, sub.insertColumnNames);
+            for (const { sql: iSql, params: iParams } of subBatches) {
+              this._executor.exec(iSql, iParams, "insert");
+            }
           }
         }
       });
@@ -810,20 +863,24 @@ export class Repository<
         }
 
         // Re-sync sub-tables: delete old rows, re-insert
-        for (const obj of objs) {
-          const pkVal = obj[this.descriptor.primaryKey.name];
-          for (const sub of this.meta.subTables) {
+        for (const sub of this.meta.subTables) {
+          const allSubRows: Record<string, unknown>[] = [];
+          for (const obj of objs) {
+            const pkVal = this._assertPk(obj[this.descriptor.primaryKey.name]);
             this._executor.exec(
               `DELETE FROM "${sub.tableName}" WHERE "_owner_id" = ?`,
-              [pkVal as string | number],
+              [pkVal],
               "delete"
             );
             const items = obj[sub.fieldName];
             if (!globalThis.Array.isArray(items) || items.length === 0) continue;
-            const rows = flattenSubRows(this._assertPk(pkVal), items, sub, this._codecs);
-            for (const row of rows) {
-              const { sql: iSql, params: iParams } = buildInsert(sub.tableName, row);
-              this._executor.exec(iSql, iParams, "insert");
+            const rows = flattenSubRows(pkVal, items, sub, this._codecs);
+            for (const row of rows) allSubRows.push(row);
+          }
+          if (allSubRows.length > 0) {
+            const subBatches = buildInsertMany(sub.tableName, allSubRows, 999, sub.insertColsSql, sub.insertValueGroup, sub.insertColumnNames);
+            for (const { sql, params } of subBatches) {
+              this._executor.exec(sql, params, "upsertMany");
             }
           }
         }
@@ -837,7 +894,7 @@ export class Repository<
     });
   }
 
-  // ─── Find by PK ────────────────────────────────────────────────────────────
+  // --- Find by PK ------------------------------------------------------------
 
   /**
    * Find a record by its primary key.
@@ -889,7 +946,20 @@ export class Repository<
     return this._wrap(this._hydrateOne(row));
   }
 
-  // ─── Find many ─────────────────────────────────────────────────────────────
+  /** Internal raw row fetch without hydration - used by update() */
+  private _findFlatRow(id: Infer<TQuery>[PK]): Record<string, unknown> | null {
+    const pk = this.descriptor.primaryKey.name;
+    const sql = this.descriptor.softDelete
+      ? `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? AND "${this.descriptor.softDelete.column}" IS NULL LIMIT 1`
+      : `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? LIMIT 1`;
+    return this._executor.get<Record<string, unknown>>(
+      sql,
+      [id as string | number | bigint | null],
+      "findById"
+    );
+  }
+
+  // --- Find many -------------------------------------------------------------
 
   /**
    * Find many records matching the given filters.
@@ -912,7 +982,11 @@ export class Repository<
   O_findMany(opts: FindOptions<TQuery> = {}): (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]> & TS)[] {
     return withTrace("repository.findMany", { table: this.tableName }, () => {
       traceBegin("repo.findMany.fetchRows");
-      const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk({ ...opts, select: opts.select }) : opts;
+      // Default limit of 1000 to prevent unbounded memory consumption
+      const resolvedOpts = {
+        ...(opts.select && opts.include ? this._ensureSelectPk({ ...opts, select: opts.select }) : opts),
+        limit: opts.limit ?? 1000,
+      };
       const rows = this._fetchRows(resolvedOpts, "findMany");
       traceEnd({ rows: rows.length });
 
@@ -944,48 +1018,57 @@ export class Repository<
         }
       }
 
-      // N+1-safe sub-table hydration
+      // N+1-safe sub-table hydration (only when include is explicitly requested)
       traceBegin("repo.findMany.prefetchSubs");
       const pk = this.descriptor.primaryKey.name;
       const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
 
       const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
-      for (const sub of this.meta.subTables) {
-        const included = !opts.include || opts.include.some((name) => name === sub.fieldName);
-        if (!included) continue;
-        if (pkValues.length === 0) continue;
-        traceBegin(`repo.findMany.prefetch.${sub.fieldName}`);
-        const ph = pkValues.map(() => "?").join(", ");
-        const subRows = this._executor.all<Record<string, unknown>>(
-          `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
-          pkValues,
-          "findMany"
-        );
-        const byOwner = new Map<string | number, Record<string, unknown>[]>();
-        for (const r of subRows) {
-          const owner = r._owner_id;
-          if (typeof owner !== "string" && typeof owner !== "number") continue;
-          if (!byOwner.has(owner)) byOwner.set(owner, []);
-          byOwner.get(owner)!.push(r);
+      if (opts.include && opts.include.length > 0) {
+        for (const sub of this.meta.subTables) {
+          const included = opts.include.some((name) => name === sub.fieldName);
+          if (!included) continue;
+          if (pkValues.length === 0) continue;
+          traceBegin(`repo.findMany.prefetch.${sub.fieldName}`);
+          const ph = pkValues.map(() => "?").join(", ");
+          const subRows = this._executor.all<Record<string, unknown>>(
+            `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+            pkValues,
+            "findMany"
+          );
+          const byOwner = new Map<string | number, Record<string, unknown>[]>();
+          for (const r of subRows) {
+            const owner = r._owner_id;
+            if (typeof owner !== "string" && typeof owner !== "number") continue;
+            if (!byOwner.has(owner)) byOwner.set(owner, []);
+            byOwner.get(owner)!.push(r);
+          }
+          prefetchedBySub.set(sub.tableName, byOwner);
+          traceEnd({ subRows: subRows.length });
         }
-        prefetchedBySub.set(sub.tableName, byOwner);
-        traceEnd({ subRows: subRows.length });
       }
       traceEnd();
 
       traceBegin("repo.findMany.hydrate");
-      const results = rows.map((r) => {
-        const rowPrefetched = new Map<string, Record<string, unknown>[]>();
-        for (const sub of this.meta.subTables) {
-          const included = !opts.include || opts.include.some((name) => name === sub.fieldName);
-          if (!included) continue;
-          const byOwner = prefetchedBySub.get(sub.tableName);
-          const key = r[pk];
-          const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
-          rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
-        }
-        return this._wrap(this._hydrateOne(r, opts.include, opts.select, rowPrefetched));
-      });
+      if (opts.include && opts.include.length > 0) {
+        const results = rows.map((r) => {
+          const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+          for (const sub of this.meta.subTables) {
+            const included = opts.include!.some((name) => name === sub.fieldName);
+            if (!included) continue;
+            const byOwner = prefetchedBySub.get(sub.tableName);
+            const key = r[pk];
+            const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+            rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+          }
+          return this._wrap(this._hydrateOne(r, opts.include, opts.select, rowPrefetched));
+        });
+        traceEnd();
+        this._emit("findMany", { options: opts, result: results });
+        return results;
+      }
+      // Fast path: no include → skip sub-table hydration entirely
+      const results = rows.map((r) => this._wrap(hydrateRow(r, this.meta, new Map(), this._codecs, opts.select)));
       traceEnd();
       this._emit("findMany", { options: opts, result: results });
       return results;
@@ -1169,36 +1252,35 @@ export class Repository<
   O_iterate<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): Generator<SelectShape<TQuery, S> & TS>;
   O_iterate(opts?: FindOptions<TQuery>): Generator<Entity<Infer<TQuery>, Mat, TS>>;
   *O_iterate(opts: FindOptions<TQuery> = {}): Generator<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]> & TS> {
-    enterTrace("repository.iterate", { table: this.tableName });
-    try {
-      const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts.select ? this._ensureSelectPk(opts) : opts;
-      const { sql, params } = buildSelectSql(this.tableName, resolvedOpts, this.descriptor.softDelete?.column, this.meta);
-      const gen = this._executor.iterate<Record<string, unknown>>(sql, params, "iterate");
+    return yield* withTrace("repository.iterate", { table: this.tableName }, () => this._iterateImpl(opts));
+  }
 
-      if (!opts.include || opts.include.length === 0) {
-        for (const row of gen) {
-          yield this._wrap(this._hydrateOne(row, undefined, opts.select));
-        }
-        return;
-      }
+  private *_iterateImpl(opts: FindOptions<TQuery>): Generator<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]> & TS> {
+    const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts.select ? this._ensureSelectPk(opts) : opts;
+    const { sql, params } = buildSelectSql(this.tableName, resolvedOpts, this.descriptor.softDelete?.column, this.meta);
+    const gen = this._executor.iterate<Record<string, unknown>>(sql, params, "iterate");
 
-      const pk = this.descriptor.primaryKey.name;
-      const windowSize = 100;
-      let buffer: Record<string, unknown>[] = [];
-
+    if (!opts.include || opts.include.length === 0) {
       for (const row of gen) {
-        buffer.push(row);
-        if (buffer.length >= windowSize) {
-          yield* this._hydrateWindow(buffer, opts.include, opts.select);
-          buffer = [];
-        }
+        yield this._wrap(this._hydrateOne(row, undefined, opts.select));
       }
+      return;
+    }
 
-      if (buffer.length > 0) {
+    const pk = this.descriptor.primaryKey.name;
+    const windowSize = 100;
+    let buffer: Record<string, unknown>[] = [];
+
+    for (const row of gen) {
+      buffer.push(row);
+      if (buffer.length >= windowSize) {
         yield* this._hydrateWindow(buffer, opts.include, opts.select);
+        buffer = [];
       }
-    } finally {
-      leaveTrace();
+    }
+
+    if (buffer.length > 0) {
+      yield* this._hydrateWindow(buffer, opts.include, opts.select);
     }
   }
 
@@ -1276,7 +1358,7 @@ export class Repository<
     return materialized as Entity<Infer<TQuery>, Mat, TS>[];
   }
 
-  // ─── Count ─────────────────────────────────────────────────────────────────
+  // --- Count -----------------------------------------------------------------
 
   /**
    * Count records matching the given filters.
@@ -1369,7 +1451,7 @@ export class Repository<
     });
   }
 
-  // ─── Chain API builder entry points ────────────────────────────────────────
+  // --- Chain API builder entry points ----------------------------------------
 
   /**
    * Start a chain filter query that returns many records.
@@ -1416,10 +1498,9 @@ export class Repository<
         : "";
       const limitOffsetParts: string[] = [];
       const limitOffsetParams: SQLQueryBindings[] = [];
-      if (state.limit !== undefined) {
-        limitOffsetParts.push("LIMIT ?");
-        limitOffsetParams.push(state.limit);
-      }
+      const effectiveLimit = state.limit ?? 1000;
+      limitOffsetParts.push("LIMIT ?");
+      limitOffsetParams.push(effectiveLimit);
       if (state.offset !== undefined) {
         limitOffsetParts.push("OFFSET ?");
         limitOffsetParams.push(state.offset);
@@ -1437,35 +1518,39 @@ export class Repository<
       const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
 
       const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
-      for (const sub of subTables) {
-        const included = !state.include || state.include.some((name) => name === sub.fieldName);
-        if (!included) continue;
-        if (pkValues.length === 0) continue;
-        const ph = pkValues.map(() => "?").join(", ");
-        const subRows = queryExecutor.all<Record<string, unknown>>(
-          `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
-          pkValues,
-          "findMany"
-        );
-        const byOwner = new Map<string | number, Record<string, unknown>[]>();
-        for (const r of subRows) {
-          const owner = r._owner_id;
-          if (typeof owner !== "string" && typeof owner !== "number") continue;
-          if (!byOwner.has(owner)) byOwner.set(owner, []);
-          byOwner.get(owner)!.push(r);
+      if (state.include && state.include.length > 0) {
+        for (const sub of subTables) {
+          const included = state.include.some((name) => name === sub.fieldName);
+          if (!included) continue;
+          if (pkValues.length === 0) continue;
+          const ph = pkValues.map(() => "?").join(", ");
+          const subRows = queryExecutor.all<Record<string, unknown>>(
+            `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+            pkValues,
+            "findMany"
+          );
+          const byOwner = new Map<string | number, Record<string, unknown>[]>();
+          for (const r of subRows) {
+            const owner = r._owner_id;
+            if (typeof owner !== "string" && typeof owner !== "number") continue;
+            if (!byOwner.has(owner)) byOwner.set(owner, []);
+            byOwner.get(owner)!.push(r);
+          }
+          prefetchedBySub.set(sub.tableName, byOwner);
         }
-        prefetchedBySub.set(sub.tableName, byOwner);
       }
 
       const results = rows.map((r) => {
         const rowPrefetched = new Map<string, Record<string, unknown>[]>();
-        for (const sub of subTables) {
-          const included = !state.include || state.include.some((name) => name === sub.fieldName);
-          if (!included) continue;
-          const byOwner = prefetchedBySub.get(sub.tableName);
-          const key = r[pk];
-          const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
-          rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+        if (state.include && state.include.length > 0) {
+          for (const sub of subTables) {
+            const included = state.include.some((name) => name === sub.fieldName);
+            if (!included) continue;
+            const byOwner = prefetchedBySub.get(sub.tableName);
+            const key = r[pk];
+            const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+            rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+          }
         }
         return wrap(hydrateOne(r, state.include, state.select, rowPrefetched));
       });
@@ -1612,10 +1697,9 @@ export class Repository<
         : "";
       const limitOffsetParts: string[] = [];
       const limitOffsetParams: SQLQueryBindings[] = [];
-      if (state.limit !== undefined) {
-        limitOffsetParts.push("LIMIT ?");
-        limitOffsetParams.push(state.limit);
-      }
+      const effectiveLimit = state.limit ?? 1000;
+      limitOffsetParts.push("LIMIT ?");
+      limitOffsetParams.push(effectiveLimit);
       if (state.offset !== undefined) {
         limitOffsetParts.push("OFFSET ?");
         limitOffsetParams.push(state.offset);
@@ -1757,7 +1841,7 @@ export class Repository<
     return new AggregateBuilder<TQuery>(executor);
   }
 
-  // ─── Update ────────────────────────────────────────────────────────────────
+  // --- Update ----------------------------------------------------------------
 
   /**
    * Update a record - must include the primary key. Returns the updated
@@ -1785,30 +1869,36 @@ export class Repository<
       traceEnd();
 
       traceBegin("repo.update.fetchExisting");
-      const existing = this._findByIdRaw(this._assertPk(rawPk) as Infer<TQuery>[PK]);
-      traceEnd({ found: !!existing });
-      if (!existing) return null;
+      const flatRow = this._findFlatRow(this._assertPk(rawPk) as Infer<TQuery>[PK]);
+      traceEnd({ found: !!flatRow });
+      if (!flatRow) return null;
 
       traceBegin("repo.update.mergeAndFlatten");
-      const merged = this.parse({ ...existing, ...data });
+      // Validate by merging with existing to produce a complete schema-valid object
+      const existingObj = hydrateRow(flatRow, this.meta, new Map(), this._codecs);
+      const merged = this.parse({ ...existingObj, ...data });
       const mergedObj = this._record(merged);
       if (this._timestampNames.updatedAt) {
         mergedObj[this._timestampNames.updatedAt] = Date.now();
       }
-      const flat = flattenRow(mergedObj, this.meta, this._codecs);
-      const patch = Object.fromEntries(
-        Object.entries(flat).filter(([k]) => k !== pk)
-      );
+      // Build patch from user's data only -- only touch columns the user provided
+      const userObj = this._record(data as Infer<TWrite>);
+      const patch = flattenPatch(userObj, this.meta, this._codecs);
+      delete patch[pk];
+      if (this._timestampNames.updatedAt) patch[this._timestampNames.updatedAt] = mergedObj[this._timestampNames.updatedAt];
       traceEnd();
 
-      this.db.transaction(() => {
+      const doUpdate = () => {
         traceBegin("repo.update.execMain");
         const { sql, params } = buildUpdate(this.tableName, pk, this._assertPk(rawPk), patch);
         this._executor.exec(sql, params, "update");
         traceEnd();
 
         traceBegin("repo.update.syncSubs");
+        const dataRecord = data as Record<string, unknown>;
         for (const sub of this.meta.subTables) {
+          if (!(sub.fieldName in dataRecord)) continue;
+
           this._executor.exec(
             `DELETE FROM "${sub.tableName}" WHERE "_owner_id" = ?`,
             [this._assertPk(rawPk)],
@@ -1818,13 +1908,21 @@ export class Repository<
           const items = mergedObj[sub.fieldName];
           if (!globalThis.Array.isArray(items) || items.length === 0) continue;
           const rows = flattenSubRows(this._assertPk(rawPk), items, sub, this._codecs);
-          for (const row of rows) {
-            const { sql: iSql, params: iParams } = buildInsert(sub.tableName, row);
-            this._executor.exec(iSql, iParams, "insert");
+          if (rows.length > 0) {
+            const subBatches = buildInsertMany(sub.tableName, rows, 999, sub.insertColsSql, sub.insertValueGroup, sub.insertColumnNames);
+            for (const { sql: iSql, params: iParams } of subBatches) {
+              this._executor.exec(iSql, iParams, "insert");
+            }
           }
         }
         traceEnd();
-      });
+      };
+
+      if (this.db._txDepth > 0) {
+        doUpdate();
+      } else {
+        this.db.transaction(doUpdate);
+      }
 
       const result = this._wrap(mergedObj);
       this._emit("update", { id: rawPk, data: { ...data } });
@@ -1868,7 +1966,7 @@ export class Repository<
     });
   }
 
-  // ─── Delete ────────────────────────────────────────────────────────────────
+  // --- Delete ----------------------------------------------------------------
 
   /**
    * Delete a record by its primary key. Returns `true` if a record was deleted.
@@ -1895,14 +1993,8 @@ export class Repository<
         return true;
       }
 
+      // FK CASCADE handles sub-table deletion automatically
       const result = this.db.transaction(() => {
-        for (const sub of this.meta.subTables) {
-          this._executor.exec(
-            `DELETE FROM "${sub.tableName}" WHERE "_owner_id" = ?`,
-            [id as string | number],
-            "delete"
-          );
-        }
         const result = this._executor.exec(
           `DELETE FROM "${this.tableName}" WHERE "${pk}" = ?`,
           [id as string | number],
@@ -1940,13 +2032,8 @@ export class Repository<
 
       const { sql: whereSql, params } = buildWhere(where, undefined, this.meta);
 
+      // FK CASCADE handles sub-table deletion automatically
       const changes = this.db.transaction(() => {
-        // Cascade to sub-tables first
-        for (const sub of this.meta.subTables) {
-          const delSubSql = `DELETE FROM "${sub.tableName}" WHERE "_owner_id" IN (SELECT "${pk}" FROM "${this.tableName}" ${whereSql})`.trim();
-          this._executor.exec(delSubSql, params, "delete");
-        }
-
         const delSql = `DELETE FROM "${this.tableName}" ${whereSql}`.trim();
         const result = this._executor.exec(delSql, params, "delete");
         return result.changes;
@@ -1957,7 +2044,7 @@ export class Repository<
     });
   }
 
-  // ─── Table lifecycle ───────────────────────────────────────────────────────
+  // --- Table lifecycle -------------------------------------------------------
 
   /**
    * Truncate the table and all sub-tables. Deletes all rows but keeps the schema.
@@ -1996,7 +2083,7 @@ export class Repository<
     this.db.exec(`DROP TABLE IF EXISTS "${this.tableName}"`);
   }
 
-  // ─── Sub-table hydration ───────────────────────────────────────────────────
+  // --- Sub-table hydration ---------------------------------------------------
 
   private _hydrateOne(
     flat: Record<string, unknown>,
@@ -2010,7 +2097,7 @@ export class Repository<
 
     const subRows = new Map<string, Record<string, unknown>[]>();
     for (const sub of this.meta.subTables) {
-      if (include && !include.includes(sub.fieldName)) {
+      if (include && !include!.includes(sub.fieldName)) {
         subRows.set(sub.tableName, []);
         continue;
       }
@@ -2021,20 +2108,16 @@ export class Repository<
         subTables: [],
         columnByName: sub.columnByName,
         columnByPath: sub.columnByPath,
+        insertColumns: sub.columns,
+        insertColumnNames: sub.columns.map((c) => c.name),
       };
 
       if (prefetched && prefetched.has(sub.tableName)) {
         const rows = prefetched.get(sub.tableName)!;
         traceBegin("repo.hydrateOne.cleanPrefetched");
-        const cleaned = rows.map((r) => {
-          const rest: Record<string, unknown> = {};
-          for (const key of Object.keys(r)) {
-            if (key !== "_id" && key !== "_owner_id" && key !== "_index") {
-              rest[key] = r[key];
-            }
-          }
-          return hydrateRow(rest, subMeta, new Map(), this._codecs);
-        });
+        const cleaned = sub.isScalar
+          ? rows.map((r) => ({ _value: r._value }))
+          : rows.map((r) => hydrateRow(r, subMeta, new Map(), this._codecs));
         traceEnd({ sub: sub.fieldName, rows: rows.length });
         subRows.set(sub.tableName, cleaned);
         continue;
@@ -2048,15 +2131,9 @@ export class Repository<
       );
       traceEnd({ sub: sub.fieldName, rows: rows.length });
 
-      const cleaned = rows.map((r) => {
-        const rest: Record<string, unknown> = {};
-        for (const key of Object.keys(r)) {
-          if (key !== "_id" && key !== "_owner_id" && key !== "_index") {
-            rest[key] = r[key];
-          }
-        }
-        return hydrateRow(rest, subMeta, new Map(), this._codecs);
-      });
+      const cleaned = sub.isScalar
+        ? rows.map((r) => ({ _value: r._value }))
+        : rows.map((r) => hydrateRow(r, subMeta, new Map(), this._codecs));
 
       subRows.set(sub.tableName, cleaned);
     }
@@ -2066,7 +2143,7 @@ export class Repository<
     return result;
   }
 
-  // ─── Raw access ────────────────────────────────────────────────────────────
+  // --- Raw access ------------------------------------------------------------
 
   /**
    * Run raw SQL - escape hatch for queries the ORM doesn't support directly.

@@ -1,5 +1,5 @@
 /**
- * bunorm/src/table.ts
+ * foxdb/src/table.ts
  * User-facing helper that wraps a schema + configuration into a descriptor.
  * Guarantees compile-time safety for PK and index columns via ColumnRef.
  */
@@ -30,6 +30,8 @@ export interface TableConfigShape<PK extends string, TS extends TimestampConfig,
   compression?: CompressionConfig;
   softDelete?: import("./types.ts").SoftDeleteConfig;
   generated?: G;
+  /** Auto-index TEXT columns on sub-tables. Defaults to true. Set false to disable. */
+  autoIndex?: boolean;
 }
 
 /**

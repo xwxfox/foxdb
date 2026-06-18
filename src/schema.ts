@@ -22,9 +22,9 @@ import {
 import type { ColumnCodec } from "./codec.ts";
 import type { GeneratedColumnConfig, DBValue } from "./types.ts";
 import { feature } from "bun:bundle";
-import { traceBegin, traceEnd } from "./tracing.ts";
+import { traceBegin, traceEnd, sqlDebug } from "./tracing.ts";
 
-// ─── Column metadata ──────────────────────────────────────────────────────────
+// --- Column metadata ----------------------------------------------------------
 
 /** @category Advanced */
 export type SqliteType = "TEXT" | "INTEGER" | "REAL" | "BLOB";
@@ -44,6 +44,8 @@ export interface ColumnMeta {
   generated?: boolean;
   /** Expression for generated columns */
   generatedExpr?: string;
+  /** Pre-built getter function for flattenRow (set during introspectTable) */
+  _get?: (obj: Record<string, unknown>) => unknown;
 }
 
 type SubTableMetaCommon = {
@@ -52,6 +54,12 @@ type SubTableMetaCommon = {
   columns: ColumnMeta[];
   columnByName: Map<string, ColumnMeta>;
   columnByPath: Map<string, ColumnMeta>;
+  /** Pre-built INSERT column SQL fragment, e.g. `"_owner_id", "_index", "col1", "col2"` */
+  insertColsSql?: string;
+  /** Pre-built INSERT value group fragment, e.g. `(?, ?, ?, ?)` */
+  insertValueGroup?: string;
+  /** Ordered column names for INSERT */
+  insertColumnNames?: string[];
 };
 
 /** @category Advanced */
@@ -79,9 +87,13 @@ export interface TableMeta {
   columnByName: Map<string, ColumnMeta>;
   /** The PK column name of the parent table - used for sub-table filter SQL */
   primaryKey?: string;
+  /** Non-generated columns - pre-filtered for flattenRow / INSERT / UPDATE */
+  insertColumns: ColumnMeta[];
+  /** Precomputed ordered column names for INSERT SQL */
+  insertColumnNames: string[];
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 /** TSchema with index signature for dynamic property access */
 type SchemaRecord = TSchema & Record<string, unknown>;
@@ -206,7 +218,10 @@ export function buildColumns(
     if (IsArray(raw)) {
       const { optional } = unwrapOptional(raw);
       // Arrays of objects → sub-table ONLY when explicitly told to skip
-      if (skipObjectArrays && depth === 0 && IsObject(raw.items)) continue;
+      if (skipObjectArrays && depth === 0 && IsObject(raw.items)) {
+        sqlDebug(`buildColumns skip array ${name}`, { depth, reason: "top-level object array → handled as sub-table" });
+        continue;
+      }
       // Everywhere else (inside flattened objects, or sub-tables) → JSON TEXT
       const colName = prefix.length > 0 ? [...prefix, name].join("__") : name;
       cols.push({
@@ -216,28 +231,38 @@ export function buildColumns(
         optional,
         path: prefix.length > 0 ? [...prefix, name] : undefined,
       });
+      sqlDebug(`buildColumns array ${name} → ${colName}`, { depth, sqlType: "TEXT", reason: depth === 0 ? "top-level array not of objects → scalar sub-table or JSON TEXT" : "nested array → JSON TEXT" });
       continue;
     }
     if (IsObject(raw) && depth < 2 && shouldFlattenObject(raw)) {
+      sqlDebug(`buildColumns flatten ${name}`, { depth, reason: "nested object at depth < 2 with only scalar children → flatten columns" });
       cols.push(...buildColumns(raw.properties, [...prefix, name], depth + 1, skipObjectArrays));
       continue;
+    }
+    if (IsObject(raw)) {
+      const reason = depth >= 2 ? `depth ${depth} >= 2 → store as JSON TEXT` : "contains non-scalar children or arrays → store as JSON TEXT";
+      sqlDebug(`buildColumns object ${name} → JSON TEXT`, { depth, reason });
     }
     const { schema, optional } = unwrapOptional(raw);
     const nullable = optional || isNullableUnion(schema);
     const colName = prefix.length > 0 ? [...prefix, name].join("__") : name;
+    const finalSqlType = IsObject(schema) ? "TEXT" : schemaToSqlType(schema);
     cols.push({
       name: colName,
-      sqlType: IsObject(schema) ? "TEXT" : schemaToSqlType(schema),
+      sqlType: finalSqlType,
       nullable,
       optional: nullable,
       path: prefix.length > 0 ? [...prefix, name] : undefined,
       isBoolean: IsBoolean(schema),
     });
+    if (prefix.length > 0) {
+      sqlDebug(`buildColumns scalar ${name} → ${colName}`, { depth, sqlType: finalSqlType, nullable, path: [...prefix, name] });
+    }
   }
   return cols;
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// --- Public API ---------------------------------------------------------------
 
 /** Convert GeneratedColumnConfig object to runtime format for introspectTable */
 export function convertGeneratedConfig(
@@ -265,6 +290,12 @@ export function introspectTable(
   const subTables: SubTableMeta[] = [];
   const arrayFieldNames = new Set<string>();
 
+  sqlDebug(`introspect.${tableName} start`, {
+    fieldCount: Object.keys(schema.properties).length,
+    fields: Object.keys(schema.properties),
+    generatedColumns: generated?.map((g) => g.name),
+  });
+
   for (const [fieldName, raw] of Object.entries(schema.properties)) {
     if (IsArray(raw)) {
       arrayFieldNames.add(fieldName);
@@ -272,12 +303,21 @@ export function introspectTable(
         const itemSchema = raw.items;
         const subTableName = `${tableName}__${fieldName}`;
         const subCols = buildColumns(itemSchema.properties, [], 0, false);
+        sqlDebug(`introspect.${tableName} field ${fieldName} → sub-table`, {
+          subTableName,
+          columnCount: subCols.length,
+          columns: subCols.map((c) => ({ name: c.name, sqlType: c.sqlType, path: c.path })),
+          reason: "top-level array of objects → separate sub-table with FK back to owner",
+        });
         const subByName = new Map<string, ColumnMeta>();
         const subByPath = new Map<string, ColumnMeta>();
         for (const col of subCols) {
           subByName.set(col.name, col);
           if (col.path) subByPath.set(col.path.join("."), col);
         }
+        const insertCols = ["_owner_id", "_index", ...subCols.map((c) => c.name)];
+        const insertColsSql = insertCols.map((c) => `"${c}"`).join(", ");
+        const insertValueGroup = `(${insertCols.map(() => "?").join(", ")})`;
         subTables.push({
           fieldName,
           tableName: subTableName,
@@ -285,11 +325,19 @@ export function introspectTable(
           columns: subCols,
           columnByName: subByName,
           columnByPath: subByPath,
+          insertColsSql,
+          insertValueGroup,
+          insertColumnNames: insertCols,
         });
       } else {
         // Scalar array - stored as a sub-table with a _value column
         const scalarType = inferScalarSqlType(raw.items);
         const subTableName = `${tableName}__${fieldName}`;
+        sqlDebug(`introspect.${tableName} field ${fieldName} → scalar sub-table`, {
+          subTableName,
+          scalarType,
+          reason: "top-level array of primitives → scalar sub-table with _value column",
+        });
         const _valueCol: ColumnMeta = {
           name: "_value",
           sqlType: scalarType,
@@ -298,6 +346,7 @@ export function introspectTable(
         };
         const subByName = new Map<string, ColumnMeta>([["_value", _valueCol]]);
         const subByPath = new Map<string, ColumnMeta>();
+        const insertCols = ["_owner_id", "_index", "_value"];
         subTables.push({
           fieldName,
           tableName: subTableName,
@@ -306,6 +355,9 @@ export function introspectTable(
           columnByPath: subByPath,
           isScalar: true,
           scalarType,
+          insertColsSql: insertCols.map((c) => `"${c}"`).join(", "),
+          insertValueGroup: `(${insertCols.map(() => "?").join(", ")})`,
+          insertColumnNames: insertCols,
         });
       }
     }
@@ -313,6 +365,15 @@ export function introspectTable(
 
   const columns = buildColumns(schema.properties, [], 0, true)
     .filter(col => !arrayFieldNames.has(col.name));
+
+  sqlDebug(`introspect.${tableName} columns built`, {
+    totalScalar: columns.length,
+    columnNames: columns.map((c) => c.name),
+    flatColumns: columns.filter((c) => !c.path).length,
+    pathColumns: columns.filter((c) => c.path).length,
+    textJsonColumns: columns.filter((c) => c.sqlType === "TEXT" && !c.path).length,
+    subTables: subTables.map((s) => ({ fieldName: s.fieldName, tableName: s.tableName, columns: s.columns.length })),
+  });
 
   if (generated) {
     for (const g of generated) {
@@ -333,67 +394,131 @@ export function introspectTable(
     columnByName.set(col.name, col);
     if (col.path) columnByPath.set(col.path.join("."), col);
   }
-  return { tableName, columns, subTables, columnByPath, columnByName, primaryKey };
+  const insertColumns = columns.filter((c) => !c.generated);
+  const insertColumnNames = insertColumns.map((c) => c.name);
+
+  // Pre-build getter functions for flattenRow
+  for (const col of insertColumns) {
+    if (col.path) {
+      const p = col.path;
+      if (p.length === 1) {
+        const k = p[0]!;
+        col._get = (obj: Record<string, unknown>) => (k in obj ? obj[k] : undefined);
+      } else if (p.length === 2) {
+        const k1 = p[0]!, k2 = p[1]!;
+        col._get = (obj: Record<string, unknown>) => {
+          const o = obj[k1];
+          return o && typeof o === "object" ? (o as Record<string, unknown>)[k2] : undefined;
+        };
+      } else {
+        col._get = (obj: Record<string, unknown>) => getValueAtPath(obj, p);
+      }
+    } else {
+      const k = col.name;
+      col._get = (obj: Record<string, unknown>) => obj[k];
+    }
+  }
+
+  return { tableName, columns, subTables, columnByPath, columnByName, primaryKey, insertColumns, insertColumnNames };
 }
 
-// ─── DDL generation ───────────────────────────────────────────────────────────
+// --- DDL generation -----------------------------------------------------------
 
 /** @category Advanced */
 export function buildCreateTableSQL(
   meta: TableMeta,
-  primaryKey: string
+  primaryKey: string,
+  autoIndex = true
 ): string[] {
   const stmts: string[] = [];
 
   // Main table
+  sqlDebug(`ddl.mainTable building ${meta.tableName}`, {
+    totalColumns: meta.columns.length,
+    primaryKey,
+    scalarColumns: meta.columns.filter((c) => !c.generated).length,
+    generatedColumns: meta.columns.filter((c) => c.generated).length,
+    subTables: meta.subTables.map((s) => s.fieldName),
+  });
   const colDefs = meta.columns.map((c) => {
     const notNull = !c.nullable ? " NOT NULL" : "";
     const pk = c.name === primaryKey ? " PRIMARY KEY" : "";
     const generated = c.generated && c.generatedExpr ? ` GENERATED ALWAYS AS (${c.generatedExpr}) STORED` : "";
     return `  "${c.name}" ${c.sqlType}${pk}${notNull}${generated}`;
   });
-  stmts.push(
-    `CREATE TABLE IF NOT EXISTS "${meta.tableName}" (\n${colDefs.join(",\n")}\n)`
-  );
+  const mainSql = `CREATE TABLE IF NOT EXISTS "${meta.tableName}" (\n${colDefs.join(",\n")}\n)`;
+  stmts.push(mainSql);
+  sqlDebug(`ddl.mainTable SQL for ${meta.tableName}`, { sql: mainSql });
 
-  // Sub-tables - each gets an auto _rowid_ and a FK back to owner
+  // Sub-tables - each gets an auto _rowid_ and a FK back to owner with CASCADE
   for (const sub of meta.subTables) {
+    const pkColMeta = meta.columns.find((c) => c.name === primaryKey);
+    const pkType = pkColMeta?.sqlType ?? "TEXT";
+    const fkRef = `REFERENCES "${meta.tableName}"("${primaryKey}") ON DELETE CASCADE`;
     if (sub.isScalar) {
-      const pkColMeta = meta.columns.find((c) => c.name === primaryKey);
-      const pkType = pkColMeta?.sqlType ?? "TEXT";
-      stmts.push(
-        `CREATE TABLE IF NOT EXISTS "${sub.tableName}" (\n` +
+      sqlDebug(`ddl.subTable scalar for ${sub.fieldName}`, {
+        tableName: sub.tableName,
+        scalarType: sub.scalarType,
+        ownerPkType: pkType,
+        reason: `top-level array of primitives → scalar sub-table with FK CASCADE`,
+      });
+      const subSql = `CREATE TABLE IF NOT EXISTS "${sub.tableName}" (\n` +
         `  "_id" INTEGER PRIMARY KEY AUTOINCREMENT,\n` +
-        `  "_owner_id" ${pkType} NOT NULL,\n` +
+        `  "_owner_id" ${pkType} NOT NULL ${fkRef},\n` +
         `  "_index" INTEGER NOT NULL,\n` +
-        `  "_value" ${sub.scalarType} NOT NULL\n)`
-      );
-      stmts.push(`CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__owner" ON "${sub.tableName}" ("_owner_id")`);
-      stmts.push(`CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__value" ON "${sub.tableName}" ("_value")`);
+        `  "_value" ${sub.scalarType} NOT NULL\n)`;
+      stmts.push(subSql);
+      sqlDebug(`ddl.subTable SQL for ${sub.tableName}`, { sql: subSql });
+
+      const idxOwner = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__owner" ON "${sub.tableName}" ("_owner_id")`;
+      stmts.push(idxOwner);
+      sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxOwner, reason: "FK index for hydration + CASCADE lookups" });
+
+      const idxValue = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__value" ON "${sub.tableName}" ("_value")`;
+      stmts.push(idxValue);
+      sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxValue, reason: "value lookups for arraySome/arrayNot/contains filters" });
     } else {
+      sqlDebug(`ddl.subTable object-array for ${sub.fieldName}`, {
+        tableName: sub.tableName,
+        columnCount: sub.columns.length,
+        columns: sub.columns.map((c) => c.name),
+        reason: `top-level array of objects → object sub-table with FK CASCADE`,
+      });
+      const ownerType = pkType;
       const subCols = [
         `  "_id" INTEGER PRIMARY KEY AUTOINCREMENT`,
-        `  "_owner_id" ${meta.columns.find((c) => c.name === primaryKey)?.sqlType ?? "TEXT"} NOT NULL`,
+        `  "_owner_id" ${ownerType} NOT NULL ${fkRef}`,
         `  "_index" INTEGER NOT NULL`,
         ...sub.columns.map((c) => {
           const notNull = !c.nullable ? " NOT NULL" : "";
           return `  "${c.name}" ${c.sqlType}${notNull}`;
         }),
       ];
-      stmts.push(
-        `CREATE TABLE IF NOT EXISTS "${sub.tableName}" (\n${subCols.join(",\n")}\n)`
-      );
-      // Index on owner FK for fast hydration
-      stmts.push(
-        `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__owner" ON "${sub.tableName}" ("_owner_id")`
-      );
-      // Auto-index direct (non-path) scalar columns on object-array sub-tables
-      for (const col of sub.columns) {
-        if (!col.path) {
-          stmts.push(
-            `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__${col.name}" ON "${sub.tableName}" ("${col.name}")`
-          );
+      const subSql = `CREATE TABLE IF NOT EXISTS "${sub.tableName}" (\n${subCols.join(",\n")}\n)`;
+      stmts.push(subSql);
+      sqlDebug(`ddl.subTable SQL for ${sub.tableName}`, { sql: subSql });
+
+      const idxOwner = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__owner" ON "${sub.tableName}" ("_owner_id")`;
+      stmts.push(idxOwner);
+      sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxOwner, reason: "FK index for hydration + CASCADE lookups" });
+
+      if (autoIndex) {
+        let autoIndexed = 0;
+        for (const col of sub.columns) {
+          if (!col.path && col.sqlType === "TEXT") {
+            const idxCol = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__${col.name}" ON "${sub.tableName}" ("${col.name}")`;
+            stmts.push(idxCol);
+            autoIndexed++;
+            sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxCol, reason: `auto-index TEXT column "${col.name}" for WHERE / ORDER BY` });
+          }
         }
+        sqlDebug(`ddl.autoIndex summary for ${sub.tableName}`, {
+          autoIndexed,
+          totalColumns: sub.columns.length,
+          note: autoIndexed > 0 ? "TEXT columns auto-indexed. Set autoIndex: false in table() to disable." : "no TEXT columns to auto-index",
+        });
+      } else {
+        sqlDebug(`ddl.autoIndex summary for ${sub.tableName}`, { autoIndexed: 0, note: "autoIndex disabled. only _owner_id indexed." });
       }
     }
   }
@@ -418,7 +543,7 @@ export function buildIndexSQL(
   return `CREATE ${uniq}INDEX IF NOT EXISTS "${idxName}" ON "${tableName}" (${cols})${wh}`;
 }
 
-// ─── Flatten / hydrate ────────────────────────────────────────────────────────
+// --- Flatten / hydrate --------------------------------------------------------
 
 /**
  * Flatten a full user object into the main-table row object.
@@ -468,19 +593,14 @@ export function flattenRow(
 ): Record<string, unknown> {
   if (feature("DEBUG_TRACING")) traceBegin("schema.flattenRow");
   const row: Record<string, unknown> = {};
-  if (!codecs?.size) {
-    for (const col of meta.columns) {
-      if (col.generated) continue;
-      const v = col.path ? getValueAtPath(obj, col.path) : obj[col.name];
-      row[col.name] = encodeValue(v, col.sqlType);
-    }
-  } else {
-    for (const col of meta.columns) {
-      if (col.generated) continue;
-      const v = col.path ? getValueAtPath(obj, col.path) : obj[col.name];
-      let encoded = encodeValue(v, col.sqlType);
-      const codec = codecs.get(col.name);
-      if (codec) encoded = codec.encode(encoded);
+  const hasCodecs = codecs?.size;
+  for (const col of meta.insertColumns) {
+    const v = col._get!(obj);
+    const encoded = encodeValue(v, col.sqlType);
+    if (hasCodecs) {
+      const codec = codecs!.get(col.name);
+      row[col.name] = codec ? codec.encode(encoded) : encoded;
+    } else {
       row[col.name] = encoded;
     }
   }
@@ -499,8 +619,8 @@ export function flattenPatch(
 ): Record<string, unknown> {
   if (feature("DEBUG_TRACING")) traceBegin("schema.flattenPatch");
   const row: Record<string, unknown> = {};
-  for (const col of meta.columns) {
-    if (col.generated) continue;
+  const hasCodecs = codecs?.size;
+  for (const col of meta.insertColumns) {
     if (!(col.name in obj) && !col.path) continue;
     let v: unknown;
     if (col.path) {
@@ -509,10 +629,13 @@ export function flattenPatch(
       v = obj[col.name];
     }
     if (v === undefined) continue;
-    let encoded = encodeValue(v, col.sqlType);
-    const codec = codecs?.get(col.name);
-    if (codec) encoded = codec.encode(encoded);
-    row[col.name] = encoded;
+    const encoded = encodeValue(v, col.sqlType);
+    if (hasCodecs) {
+      const codec = codecs!.get(col.name);
+      row[col.name] = codec ? codec.encode(encoded) : encoded;
+    } else {
+      row[col.name] = encoded;
+    }
   }
   if (feature("DEBUG_TRACING")) traceEnd();
   return row;
@@ -529,58 +652,43 @@ export function flattenSubRows(
 ): Array<Record<string, unknown>> {
   if (feature("DEBUG_TRACING")) traceBegin("schema.flattenSubRows");
   try {
-  if (sub.isScalar) {
+    if (sub.isScalar) {
+      const result: Array<Record<string, unknown>> = new Array(items.length);
+      for (let idx = 0; idx < items.length; idx++) {
+        const v = items[idx];
+        result[idx] = {
+          _owner_id: ownerPk,
+          _index: idx,
+          _value: encodeValue(v, sub.scalarType),
+        };
+      }
+      return result;
+    }
     const result: Array<Record<string, unknown>> = new Array(items.length);
+    const hasCodecs = codecs?.size;
     for (let idx = 0; idx < items.length; idx++) {
-      const v = items[idx];
-      result[idx] = {
+      const item = items[idx];
+      if (item === null || typeof item !== "object") {
+        throw new TypeError("Sub-table item must be an object");
+      }
+      const obj = asRecord(item);
+      const row: Record<string, unknown> = {
         _owner_id: ownerPk,
         _index: idx,
-        _value: encodeValue(v, sub.scalarType),
       };
+      for (const col of sub.columns) {
+        const v = col.path ? getValueAtPath(obj, col.path) : obj[col.name];
+        const encoded = encodeValue(v, col.sqlType);
+        if (hasCodecs) {
+          const codec = codecs!.get(col.name);
+          row[col.name] = codec ? codec.encode(encoded) : encoded;
+        } else {
+          row[col.name] = encoded;
+        }
+      }
+      result[idx] = row;
     }
     return result;
-  }
-  const result: Array<Record<string, unknown>> = new Array(items.length);
-  if (!codecs?.size) {
-    for (let idx = 0; idx < items.length; idx++) {
-      const item = items[idx];
-      if (item === null || typeof item !== "object") {
-        throw new TypeError("Sub-table item must be an object");
-      }
-      const obj = asRecord(item);
-      const row: Record<string, unknown> = {
-        _owner_id: ownerPk,
-        _index: idx,
-      };
-      for (const col of sub.columns) {
-        const v = col.path ? getValueAtPath(obj, col.path) : obj[col.name];
-        row[col.name] = encodeValue(v, col.sqlType);
-      }
-      result[idx] = row;
-    }
-  } else {
-    for (let idx = 0; idx < items.length; idx++) {
-      const item = items[idx];
-      if (item === null || typeof item !== "object") {
-        throw new TypeError("Sub-table item must be an object");
-      }
-      const obj = asRecord(item);
-      const row: Record<string, unknown> = {
-        _owner_id: ownerPk,
-        _index: idx,
-      };
-      for (const col of sub.columns) {
-        const v = col.path ? getValueAtPath(obj, col.path) : obj[col.name];
-        let encoded = encodeValue(v, col.sqlType);
-        const codec = codecs.get(col.name);
-        if (codec) encoded = codec.encode(encoded);
-        row[col.name] = encoded;
-      }
-      result[idx] = row;
-    }
-  }
-  return result;
   } finally { if (feature("DEBUG_TRACING")) traceEnd(); }
 }
 
@@ -644,6 +752,32 @@ function hydrateRowFast(
   return obj;
 }
 
+function hydrateRowCodec(
+  flat: Record<string, unknown>,
+  meta: TableMeta,
+  codecs: Map<string, ColumnCodec>,
+): Record<string, unknown> {
+  if (feature("DEBUG_TRACING")) traceBegin("schema.hydrateRowCodec");
+  const obj: Record<string, unknown> = {};
+  for (const col of meta.columns) {
+    let v: DBValue = flat[col.name] as DBValue;
+    const codec = codecs.get(col.name);
+    if (codec) v = codec.decode(v);
+    const decoded = decodeValue(v, col.sqlType, col.isBoolean);
+    if (col.path) {
+      if (col.path.length === 1) {
+        obj[col.path[0]!] = decoded;
+      } else {
+        setValueAtPath(obj, col.path, decoded);
+      }
+    } else {
+      obj[col.name] = decoded;
+    }
+  }
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return obj;
+}
+
 export function hydrateRow(
   flat: Record<string, unknown>,
   meta: TableMeta,
@@ -659,42 +793,16 @@ export function hydrateRow(
     return hydrateRowFast(flat, meta);
   }
 
+  const hasCodecs = codecs?.size;
   const obj: Record<string, unknown> = {};
 
   if (!select) {
-    // No select filtering - iterate all columns
-    if (!codecs?.size) {
-      for (const col of meta.columns) {
-        const v = decodeValue(flat[col.name], col.sqlType, col.isBoolean);
-        if (col.path) {
-          if (col.path.length === 1) {
-            obj[col.path[0]!] = v;
-          } else {
-            setValueAtPath(obj, col.path, v);
-          }
-        } else {
-          obj[col.name] = v;
-        }
-      }
+    if (!hasCodecs) {
+      hydrateRowFastOutput(flat, meta, obj);
     } else {
-      for (const col of meta.columns) {
-        let v: DBValue = flat[col.name] as DBValue;
-        const codec = codecs.get(col.name);
-        if (codec) v = codec.decode(v);
-        const decoded = decodeValue(v, col.sqlType, col.isBoolean);
-        if (col.path) {
-          if (col.path.length === 1) {
-            obj[col.path[0]!] = decoded;
-          } else {
-            setValueAtPath(obj, col.path, decoded);
-          }
-        } else {
-          obj[col.name] = decoded;
-        }
-      }
+      hydrateRowCodecOutput(flat, meta, codecs!, obj);
     }
   } else {
-    // select filtering - build a set of selected columns
     const selectedSet = new Set<string>();
     for (const s of select) {
       selectedSet.add(s);
@@ -711,8 +819,10 @@ export function hydrateRow(
     for (const col of meta.columns) {
       if (!selectedSet.has(col.name)) continue;
       let v: DBValue = flat[col.name] as DBValue;
-      const codec = codecs?.get(col.name);
-      if (codec) v = codec.decode(v);
+      if (hasCodecs) {
+        const codec = codecs!.get(col.name);
+        if (codec) v = codec.decode(v);
+      }
       const decoded = decodeValue(v, col.sqlType, col.isBoolean);
       if (col.path) {
         if (col.path.length === 1) {
@@ -725,7 +835,6 @@ export function hydrateRow(
       }
     }
 
-    // Handle synthetic aliases from JSON_EXTRACT on depth-2+ selects
     for (const key of Object.keys(flat)) {
       if (selectedSet.has(key)) continue;
       if (key.includes("__")) {
@@ -758,4 +867,37 @@ export function hydrateRow(
 
   if (feature("DEBUG_TRACING")) traceEnd();
   return obj;
+}
+
+function hydrateRowFastOutput(flat: Record<string, unknown>, meta: TableMeta, obj: Record<string, unknown>): void {
+  for (const col of meta.columns) {
+    const v = decodeValue(flat[col.name], col.sqlType, col.isBoolean);
+    if (col.path) {
+      if (col.path.length === 1) {
+        obj[col.path[0]!] = v;
+      } else {
+        setValueAtPath(obj, col.path, v);
+      }
+    } else {
+      obj[col.name] = v;
+    }
+  }
+}
+
+function hydrateRowCodecOutput(flat: Record<string, unknown>, meta: TableMeta, codecs: Map<string, ColumnCodec>, obj: Record<string, unknown>): void {
+  for (const col of meta.columns) {
+    let v: DBValue = flat[col.name] as DBValue;
+    const codec = codecs.get(col.name);
+    if (codec) v = codec.decode(v);
+    const decoded = decodeValue(v, col.sqlType, col.isBoolean);
+    if (col.path) {
+      if (col.path.length === 1) {
+        obj[col.path[0]!] = decoded;
+      } else {
+        setValueAtPath(obj, col.path, decoded);
+      }
+    } else {
+      obj[col.name] = decoded;
+    }
+  }
 }
