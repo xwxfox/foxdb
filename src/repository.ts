@@ -53,7 +53,10 @@ import {
   flattenSubRows,
   hydrateRow,
   convertGeneratedConfig,
+  compileHydrateRowFn,
+  EMPTY_MAP,
   type TableMeta,
+  type ColumnMeta,
   type SqliteScalar,
 } from "./schema.ts";
 import { GzipCodec } from "./codec.ts";
@@ -75,8 +78,9 @@ import {
 import { buildAggregateSql } from "./aggregate.ts";
 import { buildWindowSql } from "./window.ts";
 import { BatchWriter, type BatchWriterOptions } from "./batch-writer.ts";
-import { resolveTimestampNames } from "./timestamps.ts";
+import { resolveTimestampNames, DEFAULT_TIMESTAMP_NAMES } from "./timestamps.ts";
 import type { TimestampConfig } from "./timestamps.ts";
+import type { ReadScheduler } from "./asyncDatabasePool/scheduler.ts";
 import {
   FilterBuilder,
   AggregateBuilder,
@@ -166,6 +170,7 @@ export class Repository<
   private readonly _codecs: Map<string, ColumnCodec>;
   private readonly _insertColsSql: string;
   private readonly _insertPlaceholders: string;
+  private readonly _readScheduler?: ReadScheduler;
 
   /** @internal */
   setEventBus(bus: EventBus): void {
@@ -185,11 +190,13 @@ export class Repository<
       import("./types.ts").TimestampConfig,
       GeneratedColumnConfig | undefined
     >,
-    db: BunDatabase
+    db: BunDatabase,
+    readScheduler?: ReadScheduler
   ) {
     this.tableName = tableName;
     this.descriptor = config;
     this.db = db;
+    this._readScheduler = readScheduler;
     this._executor = new QueryExecutor({ db, tableName: this.tableName });
     this.meta = introspectTable(
       tableName,
@@ -197,6 +204,31 @@ export class Repository<
       convertGeneratedConfig(config.generated),
       config.primaryKey.name,
     );
+
+    // Auto-add timestamp columns when timestamps is enabled
+    if (config.timestamps) {
+      const tsConfig = typeof config.timestamps === "object" ? config.timestamps : {};
+      const createdAtName = tsConfig.createdAt ?? DEFAULT_TIMESTAMP_NAMES.createdAt;
+      const updatedAtName = tsConfig.updatedAt ?? DEFAULT_TIMESTAMP_NAMES.updatedAt;
+
+      for (const colName of [createdAtName, updatedAtName]) {
+        if (!this.meta.columnByName.has(colName)) {
+          const col: ColumnMeta = {
+            name: colName,
+            sqlType: "INTEGER",
+            nullable: false,
+            optional: false,
+            _get: (obj: Record<string, unknown>) => obj[colName],
+          };
+          this.meta.columns.push(col);
+          this.meta.columnByName.set(colName, col);
+          this.meta.insertColumns.push(col);
+          this.meta.insertColumnNames.push(colName);
+        }
+      }
+      this.meta._hydrateFast = compileHydrateRowFn(this.meta);
+    }
+
     this._timestampNames = resolveTimestampNames(config.timestamps, this.meta);
     this.validator = Compile(config.schema);
 
@@ -377,8 +409,16 @@ export class Repository<
     this._entityProto = proto;
   }
 
-  /** Wrap raw data in an entity object */
+  /** Wrap raw data in an entity object (with sub-table fields) */
   private _wrap(data: Record<string, unknown>): Entity<Infer<TQuery>, Mat, TS> {
+    if (!this._entityProto) return data as Entity<Infer<TQuery>, Mat, TS>;
+    const entity = Object.create(this._entityProto);
+    Object.assign(entity, data);
+    return entity as Entity<Infer<TQuery>, Mat, TS>;
+  }
+
+  /** Wrap raw data in an entity object (without sub-table fields) */
+  private _wrapNoSubs(data: Record<string, unknown>): Entity<Infer<TQuery>, Mat, TS> {
     if (!this._entityProto) return data as Entity<Infer<TQuery>, Mat, TS>;
     const entity = Object.create(this._entityProto);
     Object.assign(entity, data);
@@ -620,7 +660,7 @@ export class Repository<
         this._runEviction();
       }
       this._emit("insert", { data: obj });
-      return this._wrap(obj);
+      return this._wrapNoSubs(obj);
     });
   }
 
@@ -689,7 +729,7 @@ export class Repository<
         this._runEviction();
       }
       this._emit("insertMany", { data: objs });
-      return objs.map((obj) => this._wrap(obj));
+      return objs.map((obj) => this._wrapNoSubs(obj));
     });
   }
 
@@ -802,7 +842,7 @@ export class Repository<
         this._runEviction();
       }
       this._emit("upsert", { data: parsed });
-      return this._wrap(this._record(parsed));
+      return this._wrapNoSubs(this._record(parsed));
     });
   }
 
@@ -922,27 +962,9 @@ export class Repository<
     const sql = this.descriptor.softDelete
       ? `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? AND "${this.descriptor.softDelete.column}" IS NULL LIMIT 1`
       : `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? LIMIT 1`;
-    const row = this._executor.get<Record<string, unknown>>(
-      sql,
-      [id as string | number | bigint | null],
-      "findById"
-    );
+    const row = this._executor.get<Record<string, unknown>>(sql, [id as string | number], "findById");
     traceEnd({ found: !!row });
     if (!row) return null;
-
-    if (this.descriptor.eviction?.lruColumn && Math.random() < 0.1) {
-      const lruCol = this.descriptor.eviction.lruColumn;
-      const pk = this.descriptor.primaryKey.name;
-      Promise.resolve().then(() => {
-        try {
-          this._executor.exec(
-            `UPDATE "${this.tableName}" SET "${lruCol}" = ? WHERE "${pk}" = ?`,
-            [Date.now(), id as string | number | bigint | null]
-          );
-        } catch { /* ignore */ }
-      });
-    }
-
     return this._wrap(this._hydrateOne(row));
   }
 
@@ -976,15 +998,16 @@ export class Repository<
    * });
    * ```
    */
-  O_findMany<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): (SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] })[];
-  O_findMany<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): (SelectShape<TQuery, S> & TS)[];
+  O_findMany<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): (SelectShape<TQuery, S> & { [K in I[number]]: SubTableItem<TQuery, K>[] })[];
+  O_findMany<const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { include: I }): (Entity<Infer<TQuery>, Mat, TS> & { [K in I[number]]: SubTableItem<TQuery, K>[] })[];
+  O_findMany<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): (SelectShape<TQuery, S>)[];
   O_findMany(opts?: FindOptions<TQuery>): Entity<Infer<TQuery>, Mat, TS>[];
-  O_findMany(opts: FindOptions<TQuery> = {}): (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]> & TS)[] {
+  O_findMany(opts: FindOptions<TQuery> = {}): (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]>)[] {
     return withTrace("repository.findMany", { table: this.tableName }, () => {
       traceBegin("repo.findMany.fetchRows");
       // Default limit of 1000 to prevent unbounded memory consumption
       const resolvedOpts = {
-        ...(opts.select && opts.include ? this._ensureSelectPk({ ...opts, select: opts.select }) : opts),
+        ...(opts.include ? this._ensureSelectPk(opts) : opts),
         limit: opts.limit ?? 1000,
       };
       const rows = this._fetchRows(resolvedOpts, "findMany");
@@ -1061,14 +1084,14 @@ export class Repository<
             const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
             rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
           }
-          return this._wrap(this._hydrateOne(r, opts.include, opts.select, rowPrefetched));
+          return this._wrapNoSubs(this._hydrateOne(r, opts.include, opts.select, rowPrefetched));
         });
         traceEnd();
         this._emit("findMany", { options: opts, result: results });
         return results;
       }
       // Fast path: no include → skip sub-table hydration entirely
-      const results = rows.map((r) => this._wrap(hydrateRow(r, this.meta, new Map(), this._codecs, opts.select)));
+      const results = rows.map((r) => this._wrapNoSubs(hydrateRow(r, this.meta, EMPTY_MAP, this._codecs, opts.select, opts.include)));
       traceEnd();
       this._emit("findMany", { options: opts, result: results });
       return results;
@@ -1090,12 +1113,13 @@ export class Repository<
    * });
    * ```
    */
-  O_findPage<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): PageResult<SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
-  O_findPage<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): PageResult<SelectShape<TQuery, S> & TS>;
+  O_findPage<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): PageResult<SelectShape<TQuery, S> & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
+  O_findPage<const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { include: I }): PageResult<Entity<Infer<TQuery>, Mat, TS> & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
+  O_findPage<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): PageResult<SelectShape<TQuery, S>>;
   O_findPage(opts?: FindOptions<TQuery>): PageResult<Entity<Infer<TQuery>, Mat, TS>>;
-  O_findPage(opts: FindOptions<TQuery> = {}): PageResult<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]> & TS> {
+  O_findPage(opts: FindOptions<TQuery> = {}): PageResult<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]>> {
     return withTrace("repository.findPage", { table: this.tableName }, () => {
-      const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts;
+      const resolvedOpts = opts.include ? this._ensureSelectPk(opts) : opts;
       const { countSql, countParams } = buildSelect(
         this.tableName,
         resolvedOpts,
@@ -1103,22 +1127,68 @@ export class Repository<
         this.meta
       );
 
-      const rows = this._fetchRows(resolvedOpts, "findPage")
-        .map((r) => this._wrap(this._hydrateOne(r, opts.include, opts.select)));
+      const rows = this._fetchRows(resolvedOpts, "findPage");
 
-      const countRow = this._executor.get<{ _count: number }>(
-        countSql,
-        countParams,
-        "count"
-      );
+      const include = resolvedOpts.include;
+      const pk = this.descriptor.primaryKey.name;
 
+      if (include && include.length > 0) {
+        // Batch-fetch sub-table rows (same as O_findMany pattern)
+        const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+        const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+        for (const sub of this.meta.subTables) {
+          const inc = include.some((name) => name === sub.fieldName);
+          if (!inc || pkValues.length === 0) continue;
+          const ph = pkValues.map(() => "?").join(", ");
+          const subRows = this._executor.all<Record<string, unknown>>(
+            `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+            pkValues,
+            "findPage"
+          );
+          const byOwner = new Map<string | number, Record<string, unknown>[]>();
+          for (const r of subRows) {
+            const owner = r._owner_id;
+            if (typeof owner !== "string" && typeof owner !== "number") continue;
+            if (!byOwner.has(owner)) byOwner.set(owner, []);
+            byOwner.get(owner)!.push(r);
+          }
+          prefetchedBySub.set(sub.tableName, byOwner);
+        }
+
+        const results = rows.map((r) => {
+          const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+          for (const sub of this.meta.subTables) {
+            const inc = include.some((name) => name === sub.fieldName);
+            if (!inc) continue;
+            const byOwner = prefetchedBySub.get(sub.tableName);
+            const key = r[pk];
+            const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+            rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+          }
+          return this._wrapNoSubs(this._hydrateOne(r, include, resolvedOpts.select, rowPrefetched));
+        });
+
+        const countRow = this._executor.get<{ _count: number }>(countSql, countParams, "count");
+        const result = {
+          data: results,
+          total: (countRow ?? { _count: 0 })._count,
+          limit: resolvedOpts.limit ?? results.length,
+          offset: resolvedOpts.offset ?? 0,
+        };
+        this._emit("findPage", { options: opts, result });
+        return result;
+      }
+
+      // Fast path: no include → hydrate without sub-table fetching
+      const results = rows.map((r) => this._wrapNoSubs(hydrateRow(r, this.meta, EMPTY_MAP, this._codecs, resolvedOpts.select)));
+
+      const countRow = this._executor.get<{ _count: number }>(countSql, countParams, "count");
       const result = {
-        data: rows,
+        data: results,
         total: (countRow ?? { _count: 0 })._count,
-        limit: opts.limit ?? rows.length,
-        offset: opts.offset ?? 0,
+        limit: resolvedOpts.limit ?? results.length,
+        offset: resolvedOpts.offset ?? 0,
       };
-
       this._emit("findPage", { options: opts, result });
       return result;
     });
@@ -1188,7 +1258,7 @@ export class Repository<
         "findCursorPage"
       );
 
-      let results = rows.map((r) => this._wrap(this._hydrateOne(r)));
+      let results = rows.map((r) => this._wrapNoSubs(this._hydrateOne(r)));
       if (opts.cursor?.direction === "prev") {
         results.reverse();
       }
@@ -1220,15 +1290,30 @@ export class Repository<
    * });
    * ```
    */
-  O_findOne<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): (SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] }) | null;
-  O_findOne<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): (SelectShape<TQuery, S> & TS) | null;
+  O_findOne<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): (SelectShape<TQuery, S> & { [K in I[number]]: SubTableItem<TQuery, K>[] }) | null;
+  O_findOne<const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { include: I }): (Entity<Infer<TQuery>, Mat, TS> & { [K in I[number]]: SubTableItem<TQuery, K>[] }) | null;
+  O_findOne<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): (SelectShape<TQuery, S>) | null;
   O_findOne(opts?: FindOptions<TQuery>): Entity<Infer<TQuery>, Mat, TS> | null;
-  O_findOne(opts: FindOptions<TQuery> = {}): (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]> & TS) | null {
+  O_findOne(opts: FindOptions<TQuery> = {}): (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]>) | null {
     return withTrace("repository.findOne", { table: this.tableName }, () => {
-      const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts;
+      traceBegin("repo.findOne.fetchRow");
+      const resolvedOpts = opts.include ? this._ensureSelectPk(opts) : opts;
       const rows = this._fetchRows({ ...resolvedOpts, limit: 1 }, "findOne");
       const row = rows.length > 0 ? rows[0]! : null;
-      const result = row ? this._wrap(this._hydrateOne(row, opts.include, opts.select)) : null;
+      traceEnd({ found: !!row });
+
+      if (!row) {
+        this._emit("findOne", { options: opts, result: null });
+        return null;
+      }
+
+      if (opts.include && opts.include.length > 0) {
+        const result = this._wrapNoSubs(this._hydrateOne(row, opts.include, opts.select));
+        this._emit("findOne", { options: opts, result });
+        return result;
+      }
+
+      const result = this._wrapNoSubs(hydrateRow(row, this.meta, EMPTY_MAP, this._codecs, opts.select, opts.include));
       this._emit("findOne", { options: opts, result });
       return result;
     });
@@ -1247,22 +1332,22 @@ export class Repository<
    * }
    * ```
    */
-  O_iterate<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): Generator<SelectShape<TQuery, S> & TS & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
+  O_iterate<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): Generator<SelectShape<TQuery, S> & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
   O_iterate<const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { include: I }): Generator<Entity<Infer<TQuery>, Mat, TS> & { [K in I[number]]: SubTableItem<TQuery, K>[] }>;
-  O_iterate<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): Generator<SelectShape<TQuery, S> & TS>;
+  O_iterate<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): Generator<SelectShape<TQuery, S>>;
   O_iterate(opts?: FindOptions<TQuery>): Generator<Entity<Infer<TQuery>, Mat, TS>>;
-  *O_iterate(opts: FindOptions<TQuery> = {}): Generator<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]> & TS> {
+  *O_iterate(opts: FindOptions<TQuery> = {}): Generator<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]>> {
     return yield* withTrace("repository.iterate", { table: this.tableName }, () => this._iterateImpl(opts));
   }
 
-  private *_iterateImpl(opts: FindOptions<TQuery>): Generator<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]> & TS> {
-    const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts.select ? this._ensureSelectPk(opts) : opts;
+  private *_iterateImpl(opts: FindOptions<TQuery>): Generator<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]>> {
+    const resolvedOpts = opts.include ? this._ensureSelectPk(opts) : opts;
     const { sql, params } = buildSelectSql(this.tableName, resolvedOpts, this.descriptor.softDelete?.column, this.meta);
     const gen = this._executor.iterate<Record<string, unknown>>(sql, params, "iterate");
 
     if (!opts.include || opts.include.length === 0) {
       for (const row of gen) {
-        yield this._wrap(this._hydrateOne(row, undefined, opts.select));
+        yield this._wrapNoSubs(this._hydrateOne(row, undefined, opts.select));
       }
       return;
     }
@@ -1323,7 +1408,7 @@ export class Repository<
         const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
         rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
       }
-      yield this._wrap(this._hydrateOne(row, include, select, rowPrefetched));
+      yield this._wrapNoSubs(this._hydrateOne(row, include, select, rowPrefetched));
     }
   }
 
@@ -1342,12 +1427,40 @@ export class Repository<
    * ```
    */
   findManyMaterialized(opts: FindOptions<TQuery> = {}): Entity<Infer<TQuery>, Mat, TS>[] {
-    const rows = this.O_findMany(opts);
-    if (!this._materializeMany) return rows;
-    const materialized = this._materializeMany(
-      rows as Record<string, unknown>[]
-    );
-    // Re-attach entity prototype in case materializeMany created copies
+    const allSubs = this.meta.subTables.map((s) => s.fieldName) as SubTableKeys<TQuery>[];
+    const resolvedOpts = { ...opts, include: allSubs, limit: opts.limit ?? 1000 };
+    const rows = this._fetchRows(resolvedOpts, "findMany");
+    const pk = this.descriptor.primaryKey.name;
+    const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+    const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+    for (const sub of this.meta.subTables) {
+      if (pkValues.length === 0) continue;
+      const ph = pkValues.map(() => "?").join(", ");
+      const subRows = this._executor.all<Record<string, unknown>>(
+        `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+        pkValues, "findMany"
+      );
+      const byOwner = new Map<string | number, Record<string, unknown>[]>();
+      for (const r of subRows) {
+        const owner = r._owner_id;
+        if (typeof owner !== "string" && typeof owner !== "number") continue;
+        if (!byOwner.has(owner)) byOwner.set(owner, []);
+        byOwner.get(owner)!.push(r);
+      }
+      prefetchedBySub.set(sub.tableName, byOwner);
+    }
+    const entities = rows.map((r) => {
+      const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+      for (const sub of this.meta.subTables) {
+        const byOwner = prefetchedBySub.get(sub.tableName);
+        const key = r[pk];
+        const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+        rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+      }
+      return this._wrap(this._hydrateOne(r, allSubs, opts.select, rowPrefetched));
+    });
+    if (!this._materializeMany) return entities;
+    const materialized = this._materializeMany(entities as Record<string, unknown>[]);
     if (this._entityProto) {
       for (const row of materialized) {
         if (Object.getPrototypeOf(row) !== this._entityProto) {
@@ -1451,6 +1564,368 @@ export class Repository<
     });
   }
 
+  // --- Async read methods (require asyncReaderPool in createORM) -------------
+
+  /**
+   * Async variant of O_findMany - executes on the worker thread pool.
+   */
+  O_findManyAsync<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): Promise<(SelectShape<TQuery, S> & { [K in I[number]]: SubTableItem<TQuery, K>[] })[]>;
+  O_findManyAsync<const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { include: I }): Promise<(Entity<Infer<TQuery>, Mat, TS> & { [K in I[number]]: SubTableItem<TQuery, K>[] })[]>;
+  O_findManyAsync<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): Promise<(SelectShape<TQuery, S>)[]>;
+  O_findManyAsync(opts?: FindOptions<TQuery>): Promise<Entity<Infer<TQuery>, Mat, TS>[]>;
+  async O_findManyAsync(opts: FindOptions<TQuery> = {}): Promise<(Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]>)[]> {
+    if (!this._readScheduler) {
+      return Promise.resolve().then(() => this.O_findMany(opts));
+    }
+    const resolvedOpts = {
+      ...(opts.include ? this._ensureSelectPk(opts) : opts),
+      limit: opts.limit ?? 1000,
+    };
+    const { sql, params } = buildSelect(this.tableName, resolvedOpts, this.descriptor.softDelete?.column, this.meta);
+    const rows = await this._readScheduler.exec<Record<string, unknown>[]>(sql, params);
+
+    const pk = this.descriptor.primaryKey.name;
+    const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+    const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+    if (opts.include && opts.include.length > 0) {
+      for (const sub of this.meta.subTables) {
+        const included = opts.include.some((name) => name === sub.fieldName);
+        if (!included) continue;
+        if (pkValues.length === 0) continue;
+        const ph = pkValues.map(() => "?").join(", ");
+        const subRows = await this._readScheduler.exec<Record<string, unknown>[]>(
+          `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+          pkValues
+        );
+        const byOwner = new Map<string | number, Record<string, unknown>[]>();
+        for (const r of subRows) {
+          const owner = r._owner_id;
+          if (typeof owner !== "string" && typeof owner !== "number") continue;
+          if (!byOwner.has(owner)) byOwner.set(owner, []);
+          byOwner.get(owner)!.push(r);
+        }
+        prefetchedBySub.set(sub.tableName, byOwner);
+      }
+    }
+
+    let results: (Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]>)[];
+    if (opts.include && opts.include.length > 0) {
+      results = rows.map((r) => {
+        const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+        for (const sub of this.meta.subTables) {
+          const included = opts.include!.some((name) => name === sub.fieldName);
+          if (!included) continue;
+          const byOwner = prefetchedBySub.get(sub.tableName);
+          const key = r[pk];
+          const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+          rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+        }
+        return this._wrapNoSubs(this._hydrateOne(r, opts.include, opts.select, rowPrefetched));
+      });
+    } else {
+      results = rows.map((r) => this._wrapNoSubs(hydrateRow(r, this.meta, EMPTY_MAP, this._codecs, opts.select, opts.include)));
+    }
+
+    this._emit("findMany", { options: opts, result: results });
+    return results;
+  }
+
+  /**
+   * Async variant of O_findOne - executes on the worker thread pool.
+   */
+  O_findOneAsync<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): Promise<(SelectShape<TQuery, S> & { [K in I[number]]: SubTableItem<TQuery, K>[] }) | null>;
+  O_findOneAsync<const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { include: I }): Promise<(Entity<Infer<TQuery>, Mat, TS> & { [K in I[number]]: SubTableItem<TQuery, K>[] }) | null>;
+  O_findOneAsync<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): Promise<(SelectShape<TQuery, S>) | null>;
+  O_findOneAsync(opts?: FindOptions<TQuery>): Promise<Entity<Infer<TQuery>, Mat, TS> | null>;
+  async O_findOneAsync(opts: FindOptions<TQuery> = {}): Promise<(Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TWrite>]>) | null> {
+    if (!this._readScheduler) {
+      return Promise.resolve().then(() => this.O_findOne(opts));
+    }
+    const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts;
+    const { sql, params } = buildSelect(this.tableName, { ...resolvedOpts, limit: 1 }, this.descriptor.softDelete?.column, this.meta);
+    const rows = await this._readScheduler.exec<Record<string, unknown>[]>(sql, params);
+    const row = rows[0] ?? null;
+    const result = row ? this._wrapNoSubs(this._hydrateOne(row, opts.include, opts.select)) : null;
+    this._emit("findOne", { options: opts, result });
+    return result;
+  }
+
+  /**
+   * Async variant of O_findPage - executes on the worker thread pool.
+   */
+  O_findPageAsync<const S extends readonly SelectableKeys<TQuery>[], const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S; include: I }): Promise<PageResult<SelectShape<TQuery, S> & { [K in I[number]]: SubTableItem<TQuery, K>[] }>>;
+  O_findPageAsync<const I extends readonly SubTableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { include: I }): Promise<PageResult<Entity<Infer<TQuery>, Mat, TS> & { [K in I[number]]: SubTableItem<TQuery, K>[] }>>;
+  O_findPageAsync<const S extends readonly SelectableKeys<TQuery>[]>(opts: FindOptions<TQuery> & { select: S }): Promise<PageResult<SelectShape<TQuery, S>>>;
+  O_findPageAsync(opts?: FindOptions<TQuery>): Promise<PageResult<Entity<Infer<TQuery>, Mat, TS>>>;
+  async O_findPageAsync(opts: FindOptions<TQuery> = {}): Promise<PageResult<Entity<Infer<TQuery>, Mat, TS> | SelectShape<TQuery, [ScalarKeys<TQuery>]>>> {
+    if (!this._readScheduler) {
+      return Promise.resolve().then(() => this.O_findPage(opts));
+    }
+    const resolvedOpts = opts.include ? this._ensureSelectPk(opts) : opts;
+    const { sql, params, countSql, countParams } = buildSelect(this.tableName, resolvedOpts, this.descriptor.softDelete?.column, this.meta);
+
+    const [rows, countRows] = await Promise.all([
+      this._readScheduler.exec<Record<string, unknown>[]>(sql, params),
+      this._readScheduler.exec<{ _count: number }[]>(countSql, countParams),
+    ]);
+
+    const include = resolvedOpts.include;
+    const pk = this.descriptor.primaryKey.name;
+
+    if (include && include.length > 0) {
+      // Batch-prefetch sub-table rows (matching sync O_findPage pattern)
+      const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+      const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+      for (const sub of this.meta.subTables) {
+        const inc = include.some((name) => name === sub.fieldName);
+        if (!inc || pkValues.length === 0) continue;
+        const ph = pkValues.map(() => "?").join(", ");
+        const subRows = await this._readScheduler.exec<Record<string, unknown>[]>(
+          `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+          pkValues
+        );
+        const byOwner = new Map<string | number, Record<string, unknown>[]>();
+        for (const r of subRows) {
+          const owner = r._owner_id;
+          if (typeof owner !== "string" && typeof owner !== "number") continue;
+          if (!byOwner.has(owner)) byOwner.set(owner, []);
+          byOwner.get(owner)!.push(r);
+        }
+        prefetchedBySub.set(sub.tableName, byOwner);
+      }
+
+      const hydrated = rows.map((r) => {
+        const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+        for (const sub of this.meta.subTables) {
+          const inc = include.some((name) => name === sub.fieldName);
+          if (!inc) continue;
+          const byOwner = prefetchedBySub.get(sub.tableName);
+          const key = r[pk];
+          const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+          rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+        }
+        return this._wrapNoSubs(this._hydrateOne(r, include, resolvedOpts.select, rowPrefetched));
+      });
+
+      const total = (countRows[0] ?? { _count: 0 })._count;
+      const result = {
+        data: hydrated,
+        total,
+        limit: opts.limit ?? hydrated.length,
+        offset: opts.offset ?? 0,
+      };
+      this._emit("findPage", { options: opts, result });
+      return result;
+    }
+
+    // Fast path: no include → hydrate without sub-table fetching
+    const hydrated = rows.map((r) => this._wrapNoSubs(hydrateRow(r, this.meta, EMPTY_MAP, this._codecs, resolvedOpts.select)));
+    const total = (countRows[0] ?? { _count: 0 })._count;
+
+    const result = {
+      data: hydrated,
+      total,
+      limit: opts.limit ?? hydrated.length,
+      offset: opts.offset ?? 0,
+    };
+    this._emit("findPage", { options: opts, result });
+    return result;
+  }
+
+  /**
+   * Async variant of O_findCursorPage - executes on the worker thread pool.
+   */
+  async O_findCursorPageAsync(opts: {
+    where?: WhereClause<TQuery>;
+    orderBy: OrderByClause<TQuery>;
+    cursor?: CursorInput;
+    limit?: number;
+  }): Promise<CursorPageResult<Entity<Infer<TQuery>, Mat, TS>>> {
+    if (!this._readScheduler) {
+      return Promise.resolve().then(() => this.O_findCursorPage(opts));
+    }
+    const direction = opts.orderBy.direction ?? "ASC";
+    const colRef = resolveOrderByColumn(opts.orderBy.column, this.meta);
+    const limit = opts.limit ?? 25;
+
+    const { sql: whereSql, params: whereParams } = buildWhere(
+      opts.where,
+      this.descriptor.softDelete?.column,
+      this.meta
+    );
+
+    let sql = `SELECT * FROM "${this.tableName}"`;
+    const params: SQLQueryBindings[] = [...whereParams];
+
+    if (opts.cursor) {
+      const cursorCol = resolveOrderByColumn(opts.cursor.column, this.meta);
+      const op = opts.cursor.direction === "next"
+        ? (direction === "ASC" ? ">" : "<")
+        : (direction === "ASC" ? "<" : ">");
+      const cursorCondition = `${cursorCol} ${op} ?`;
+      params.push(opts.cursor.value);
+
+      if (whereSql) {
+        sql += ` ${whereSql} AND ${cursorCondition}`;
+      } else {
+        sql += ` WHERE ${cursorCondition}`;
+      }
+    } else {
+      if (whereSql) sql += ` ${whereSql}`;
+    }
+
+    const queryDirection = opts.cursor?.direction === "prev"
+      ? (direction === "ASC" ? "DESC" : "ASC")
+      : direction;
+
+    sql += ` ORDER BY ${colRef} ${queryDirection} LIMIT ${limit}`;
+
+    const rows = await this._readScheduler.exec<Record<string, unknown>[]>(sql, params);
+
+    let results = rows.map((r) => this._wrapNoSubs(this._hydrateOne(r)));
+    if (opts.cursor?.direction === "prev") {
+      results.reverse();
+    }
+
+    const nextCursor: Cursor | null = results.length === limit
+      ? { column: opts.orderBy.column, value: cursorValue(results[results.length - 1] as Record<string, unknown>, opts.orderBy.column) }
+      : null;
+    const prevCursor: Cursor | null = results.length > 0
+      ? { column: opts.orderBy.column, value: cursorValue(results[0] as Record<string, unknown>, opts.orderBy.column) }
+      : null;
+
+    const result = { data: results, nextCursor, prevCursor };
+    this._emit("findCursorPage", { options: opts, result });
+    return result;
+  }
+
+  /**
+   * Async variant of O_count - executes on the worker thread pool.
+   */
+  async O_countAsync(where?: WhereClause<TQuery>): Promise<number> {
+    if (!this._readScheduler) {
+      return Promise.resolve().then(() => this.O_count(where));
+    }
+    const { sql, params } = buildWhere(where, this.descriptor.softDelete?.column, this.meta);
+    const fullSql = `SELECT COUNT(*) as "_count" FROM "${this.tableName}" ${sql}`.trim();
+    const rows = await this._readScheduler.exec<{ _count: number }[]>(fullSql, params);
+    const result = (rows[0] ?? { _count: 0 })._count;
+    this._emit("count", { where, result });
+    return result;
+  }
+
+  /**
+   * Async variant of O_aggregate - executes on the worker thread pool.
+   */
+  async O_aggregateAsync<
+    const A extends Record<string, AggregationOp<TQuery>>,
+    const G extends readonly (ScalarKeys<TQuery> | import("./types.ts").ScalarJsonPath<TQuery>)[] | undefined = undefined
+  >(opts: AggregateOptions<TQuery, A> & { groupBy?: G }): Promise<AggregateResult<TQuery, A, G>> {
+    if (!this._readScheduler) {
+      return Promise.resolve().then(() => this.O_aggregate(opts));
+    }
+    const { sql, params } = buildAggregateSql(this.tableName, opts, this.descriptor.softDelete?.column, this.meta);
+    const rows = await this._readScheduler.exec<AggregateResult<TQuery, A, G>>(sql, params);
+    this._emit("aggregate", { options: opts, result: rows });
+    return rows;
+  }
+
+  /**
+   * Async variant of O_windowQuery - executes on the worker thread pool.
+   */
+  async O_windowQueryAsync<const W extends Record<string, import("./types.ts").WindowFunction<TQuery>>>(
+    opts: WindowQueryOptions<TQuery> & { select: W }
+  ): Promise<WindowResult<TQuery, W>> {
+    if (!this._readScheduler) {
+      return Promise.resolve().then(() => this.O_windowQuery(opts));
+    }
+    const { sql, params } = buildWindowSql(this.tableName, opts, this.descriptor.softDelete?.column, this.meta);
+    const rows = await this._readScheduler.exec<WindowResult<TQuery, W>>(sql, params);
+    this._emit("windowQuery", { options: opts, result: rows });
+    return rows;
+  }
+
+  /**
+   * Async variant of findById - executes on the worker thread pool.
+   */
+  async findByIdAsync(id: Infer<TQuery>[PK]): Promise<Entity<Infer<TQuery>, Mat, TS> | null> {
+    if (!this._readScheduler) {
+      return Promise.resolve().then(() => this.findById(id));
+    }
+    const pk = this.descriptor.primaryKey.name;
+    const sql = this.descriptor.softDelete
+      ? `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? AND "${this.descriptor.softDelete.column}" IS NULL LIMIT 1`
+      : `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? LIMIT 1`;
+    const rows = await this._readScheduler.exec<Record<string, unknown>[]>(sql, [id as string | number | bigint | null]);
+    const row = rows[0] ?? null;
+    const result = row ? this._wrap(this._hydrateOne(row)) : null;
+    this._emit("findById", { id, result });
+    return result;
+  }
+
+  /**
+   * Async variant of findManyMaterialized - executes on the worker thread pool.
+   */
+  async findManyMaterializedAsync(opts: FindOptions<TQuery> = {}): Promise<Entity<Infer<TQuery>, Mat, TS>[]> {
+    if (!this._readScheduler) {
+      return Promise.resolve().then(() => this.findManyMaterialized(opts));
+    }
+    const allSubs = this.meta.subTables.map((s) => s.fieldName) as SubTableKeys<TQuery>[];
+    const resolvedOpts = { ...opts, include: allSubs, limit: opts.limit ?? 1000 };
+    const { sql, params } = buildSelect(this.tableName, resolvedOpts, this.descriptor.softDelete?.column, this.meta);
+    const rows = await this._readScheduler!.exec<Record<string, unknown>[]>(sql, params);
+    const pk = this.descriptor.primaryKey.name;
+    const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+    const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+    for (const sub of this.meta.subTables) {
+      if (pkValues.length === 0) continue;
+      const ph = pkValues.map(() => "?").join(", ");
+      const subRows = await this._readScheduler!.exec<Record<string, unknown>[]>(
+        `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+        pkValues
+      );
+      const byOwner = new Map<string | number, Record<string, unknown>[]>();
+      for (const r of subRows) {
+        const owner = r._owner_id;
+        if (typeof owner !== "string" && typeof owner !== "number") continue;
+        if (!byOwner.has(owner)) byOwner.set(owner, []);
+        byOwner.get(owner)!.push(r);
+      }
+      prefetchedBySub.set(sub.tableName, byOwner);
+    }
+    const entities = rows.map((r) => {
+      const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+      for (const sub of this.meta.subTables) {
+        const byOwner = prefetchedBySub.get(sub.tableName);
+        const key = r[pk];
+        const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+        rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+      }
+      return this._wrap(this._hydrateOne(r, allSubs, opts.select, rowPrefetched));
+    });
+    if (!this._materializeMany) return entities;
+    const materialized = this._materializeMany(entities as Record<string, unknown>[]);
+    if (this._entityProto) {
+      for (const row of materialized) {
+        if (Object.getPrototypeOf(row) !== this._entityProto) {
+          Object.setPrototypeOf(row, this._entityProto);
+        }
+      }
+    }
+    return materialized as Entity<Infer<TQuery>, Mat, TS>[];
+  }
+
+  /**
+   * Async variant of raw - executes on the worker thread pool.
+   */
+  async rawAsync<R = import("./types.ts").DBRow>(sql: string, ...params: import("./types.ts").DBValue[]): Promise<R[]> {
+    if (!this._readScheduler) {
+      return Promise.resolve().then(() => this.raw<R>(sql, ...params));
+    }
+    const result = await this._readScheduler.exec<R[]>(sql, params.map(toBinding));
+    return result ?? [];
+  }
+
   // --- Chain API builder entry points ----------------------------------------
 
   /**
@@ -1473,10 +1948,11 @@ export class Repository<
     const tableName = this.tableName;
     const meta = this.meta;
     const queryExecutor = this._executor;
+    const readScheduler = this._readScheduler;
     const softDeleteCol = this.descriptor.softDelete?.column;
     const pk = this.descriptor.primaryKey.name;
     const subTables = this.meta.subTables;
-    const wrap = this._wrap.bind(this);
+    const wrap = this._wrapNoSubs.bind(this);
     const hydrateOne = this._hydrateOne.bind(this);
     const emit = this._emit.bind(this);
 
@@ -1488,6 +1964,10 @@ export class Repository<
       );
 
       let selectCols = "*";
+      // Ensure PK is in select columns when include is requested (needed for sub-table batch fetching)
+      if (state.include && state.include.length > 0 && state.select && !state.select.includes(pk)) {
+        state.select = [...state.select, pk];
+      }
       if (state.select && state.select.length > 0) {
         selectCols = state.select.map((c) => `"${c}"`).join(", ");
       }
@@ -1540,26 +2020,113 @@ export class Repository<
         }
       }
 
-      const results = rows.map((r) => {
-        const rowPrefetched = new Map<string, Record<string, unknown>[]>();
-        if (state.include && state.include.length > 0) {
+      const results = state.include && state.include.length > 0
+        ? rows.map((r) => {
+          const rowPrefetched = new Map<string, Record<string, unknown>[]>();
           for (const sub of subTables) {
-            const included = state.include.some((name) => name === sub.fieldName);
+            const included = state.include!.some((name) => name === sub.fieldName);
             if (!included) continue;
             const byOwner = prefetchedBySub.get(sub.tableName);
             const key = r[pk];
             const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
             rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
           }
-        }
-        return wrap(hydrateOne(r, state.include, state.select, rowPrefetched));
-      });
+          return wrap(hydrateOne(r, state.include, state.select, rowPrefetched));
+        })
+        : rows.map((r) => wrap(hydrateRow(r, meta, EMPTY_MAP, this._codecs, state.select, state.include)));
 
       emit("findMany", { options: {}, result: results });
       return results;
     };
 
-    return new FilterBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS>[]>(executor);
+    const fb = new FilterBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS>[]>(executor);
+
+    if (readScheduler) {
+      const asyncExecutor = async (state: InternalBuilderState): Promise<Entity<Infer<TQuery>, Mat, TS>[]> => {
+        const { sql: whereSql, params: whereParams } = buildWhereFromNodes(
+          state.nodes,
+          state.includeDeleted ? undefined : softDeleteCol,
+          meta
+        );
+
+        let selectCols = "*";
+        // Ensure PK is in select columns when include is requested (needed for sub-table batch fetching)
+        if (state.include && state.include.length > 0 && state.select && !state.select.includes(pk)) {
+          state.select = [...state.select, pk];
+        }
+        if (state.select && state.select.length > 0) {
+          selectCols = state.select.map((c) => `"${c}"`).join(", ");
+        }
+
+        const distinctPrefix = state.distinct ? "DISTINCT " : "";
+        const orderSql = state.orderBy.length > 0
+          ? "ORDER BY " + state.orderBy.map((o) => `${resolveOrderByColumn(o.column, meta)} ${o.direction}`).join(", ")
+          : "";
+        const limitOffsetParts: string[] = [];
+        const limitOffsetParams: SQLQueryBindings[] = [];
+        const effectiveLimit = state.limit ?? 1000;
+        limitOffsetParts.push("LIMIT ?");
+        limitOffsetParams.push(effectiveLimit);
+        if (state.offset !== undefined) {
+          limitOffsetParts.push("OFFSET ?");
+          limitOffsetParams.push(state.offset);
+        }
+
+        const sql = [
+          `SELECT ${distinctPrefix}${selectCols} FROM "${tableName}"`,
+          whereSql,
+          orderSql,
+          limitOffsetParts.join(" "),
+        ].filter(Boolean).join(" ");
+
+        const rows = await readScheduler.exec<Record<string, unknown>[]>(sql, [...whereParams, ...limitOffsetParams]);
+
+        const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+
+        const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+        if (state.include && state.include.length > 0) {
+          for (const sub of subTables) {
+            const included = state.include.some((name) => name === sub.fieldName);
+            if (!included) continue;
+            if (pkValues.length === 0) continue;
+            const ph = pkValues.map(() => "?").join(", ");
+            const subRows = await readScheduler.exec<Record<string, unknown>[]>(
+              `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+              pkValues
+            );
+            const byOwner = new Map<string | number, Record<string, unknown>[]>();
+            for (const r of subRows) {
+              const owner = r._owner_id;
+              if (typeof owner !== "string" && typeof owner !== "number") continue;
+              if (!byOwner.has(owner)) byOwner.set(owner, []);
+              byOwner.get(owner)!.push(r);
+            }
+            prefetchedBySub.set(sub.tableName, byOwner);
+          }
+        }
+
+        const results = state.include && state.include.length > 0
+          ? rows.map((r) => {
+            const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+            for (const sub of subTables) {
+              const included = state.include!.some((name) => name === sub.fieldName);
+              if (!included) continue;
+              const byOwner = prefetchedBySub.get(sub.tableName);
+              const key = r[pk];
+              const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+              rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+            }
+            return wrap(hydrateOne(r, state.include, state.select, rowPrefetched));
+          })
+          : rows.map((r) => wrap(hydrateRow(r, meta, EMPTY_MAP, this._codecs, state.select, state.include)));
+
+        emit("findMany", { options: {}, result: results });
+        return results;
+      };
+      return new FilterBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS>[]>(executor, asyncExecutor);
+    }
+
+    return fb;
   }
 
   /**
@@ -1579,8 +2146,10 @@ export class Repository<
     const tableName = this.tableName;
     const meta = this.meta;
     const queryExecutor = this._executor;
+    const readScheduler = this._readScheduler;
     const softDeleteCol = this.descriptor.softDelete?.column;
-    const wrap = this._wrap.bind(this);
+    const pk = this.descriptor.primaryKey.name;
+    const wrap = this._wrapNoSubs.bind(this);
     const hydrateOne = this._hydrateOne.bind(this);
     const emit = this._emit.bind(this);
 
@@ -1592,6 +2161,10 @@ export class Repository<
       );
 
       let selectCols = "*";
+      // Ensure PK is in select columns when include is requested (needed for sub-table batch fetching)
+      if (state.include && state.include.length > 0 && state.select && !state.select.includes(pk)) {
+        state.select = [...state.select, pk];
+      }
       if (state.select && state.select.length > 0) {
         selectCols = state.select.map((c) => `"${c}"`).join(", ");
       }
@@ -1619,7 +2192,54 @@ export class Repository<
       return result;
     };
 
-    return new FilterBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS> | null>(executor);
+    const fb = new FilterBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS> | null>(executor);
+
+    if (readScheduler) {
+      const asyncExecutor = async (state: InternalBuilderState): Promise<Entity<Infer<TQuery>, Mat, TS> | null> => {
+        const { sql: whereSql, params: whereParams } = buildWhereFromNodes(
+          state.nodes,
+          state.includeDeleted ? undefined : softDeleteCol,
+          meta
+        );
+
+        let selectCols = "*";
+        // Ensure PK is in select columns when include is requested (needed for sub-table batch fetching)
+        if (state.include && state.include.length > 0 && state.select && !state.select.includes(pk)) {
+          state.select = [...state.select, pk];
+        }
+        if (state.select && state.select.length > 0) {
+          selectCols = state.select.map((c) => `"${c}"`).join(", ");
+        }
+
+        const orderSql = state.orderBy.length > 0
+          ? "ORDER BY " + state.orderBy.map((o) => `${resolveOrderByColumn(o.column, meta)} ${o.direction}`).join(", ")
+          : "";
+
+        const sql = [
+          `SELECT ${selectCols} FROM "${tableName}"`,
+          whereSql,
+          orderSql,
+          "LIMIT 1",
+        ].filter(Boolean).join(" ");
+
+        const rows = await readScheduler.exec<Record<string, unknown>[]>(sql, whereParams);
+        const row = rows[0] ?? null;
+
+        if (!row) {
+          emit("findOne", { options: {}, result: null });
+          return null;
+        }
+
+        const result = state.include && state.include.length > 0
+          ? wrap(hydrateOne(row, state.include, state.select))
+          : wrap(hydrateRow(row, meta, EMPTY_MAP, this._codecs, state.select, state.include));
+        emit("findOne", { options: {}, result });
+        return result;
+      };
+      return new FilterBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS> | null>(executor, asyncExecutor);
+    }
+
+    return fb;
   }
 
   /**
@@ -1639,6 +2259,7 @@ export class Repository<
     const tableName = this.tableName;
     const meta = this.meta;
     const queryExecutor = this._executor;
+    const readScheduler = this._readScheduler;
     const softDeleteCol = this.descriptor.softDelete?.column;
 
     const executor = (state: InternalBuilderState): number => {
@@ -1654,7 +2275,26 @@ export class Repository<
       return result;
     };
 
-    return new FilterBuilder<TQuery, number>(executor);
+    const fb = new FilterBuilder<TQuery, number>(executor);
+
+    if (readScheduler) {
+      const asyncExecutor = async (state: InternalBuilderState): Promise<number> => {
+        const { sql: whereSql, params } = buildWhereFromNodes(
+          state.nodes,
+          state.includeDeleted ? undefined : softDeleteCol,
+          meta
+        );
+
+        const fullSql = `SELECT COUNT(*) as "_count" FROM "${tableName}" ${whereSql}`.trim();
+        const rows = await readScheduler.exec<{ _count: number }[]>(fullSql, params);
+        const row = rows[0] ?? null;
+        const result = (row ?? { _count: 0 })._count;
+        return result;
+      };
+      return new FilterBuilder<TQuery, number>(executor, asyncExecutor);
+    }
+
+    return fb;
   }
 
   /**
@@ -1676,8 +2316,10 @@ export class Repository<
     const tableName = this.tableName;
     const meta = this.meta;
     const queryExecutor = this._executor;
+    const readScheduler = this._readScheduler;
     const softDeleteCol = this.descriptor.softDelete?.column;
-    const wrap = this._wrap.bind(this);
+    const pk = this.descriptor.primaryKey.name;
+    const wrap = this._wrapNoSubs.bind(this);
     const hydrateOne = this._hydrateOne.bind(this);
 
     const executor = (state: InternalBuilderState): PageResult<Entity<Infer<TQuery>, Mat, TS>> => {
@@ -1688,6 +2330,10 @@ export class Repository<
       );
 
       let selectCols = "*";
+      // Ensure PK is in select columns when include is requested (needed for sub-table batch fetching)
+      if (state.include && state.include.length > 0 && state.select && !state.select.includes(pk)) {
+        state.select = [...state.select, pk];
+      }
       if (state.select && state.select.length > 0) {
         selectCols = state.select.map((c) => `"${c}"`).join(", ");
       }
@@ -1717,7 +2363,47 @@ export class Repository<
       const rows = queryExecutor.all<Record<string, unknown>>(sql, [...whereParams, ...limitOffsetParams], "findPage");
       const countRow = queryExecutor.get<{ _count: number }>(countSql, whereParams, "count");
 
-      const results = rows.map((r) => wrap(hydrateOne(r, state.include, state.select)));
+      let results: Entity<Infer<TQuery>, Mat, TS>[];
+
+      if (state.include && state.include.length > 0) {
+        // Batch-prefetch sub-table rows (matching O_findPage pattern)
+        const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+        const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+        for (const sub of this.meta.subTables) {
+          const inc = state.include.some((name) => name === sub.fieldName);
+          if (!inc || pkValues.length === 0) continue;
+          const ph = pkValues.map(() => "?").join(", ");
+          const subRows = queryExecutor.all<Record<string, unknown>>(
+            `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+            pkValues,
+            "findPage"
+          );
+          const byOwner = new Map<string | number, Record<string, unknown>[]>();
+          for (const r of subRows) {
+            const owner = r._owner_id;
+            if (typeof owner !== "string" && typeof owner !== "number") continue;
+            if (!byOwner.has(owner)) byOwner.set(owner, []);
+            byOwner.get(owner)!.push(r);
+          }
+          prefetchedBySub.set(sub.tableName, byOwner);
+        }
+
+        results = rows.map((r) => {
+          const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+          for (const sub of this.meta.subTables) {
+            const inc = state.include!.some((name) => name === sub.fieldName);
+            if (!inc) continue;
+            const byOwner = prefetchedBySub.get(sub.tableName);
+            const key = r[pk];
+            const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+            rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+          }
+          return wrap(hydrateOne(r, state.include, state.select, rowPrefetched));
+        });
+      } else {
+        // Fast path: no include → hydrate without sub-table fetching
+        results = rows.map((r) => this._wrapNoSubs(hydrateRow(r, this.meta, EMPTY_MAP, this._codecs, state.select, state.include)));
+      }
 
       return {
         data: results,
@@ -1727,7 +2413,104 @@ export class Repository<
       };
     };
 
-    return new FilterBuilder<TQuery, PageResult<Entity<Infer<TQuery>, Mat, TS>>>(executor);
+    const fb = new FilterBuilder<TQuery, PageResult<Entity<Infer<TQuery>, Mat, TS>>>(executor);
+
+    if (readScheduler) {
+      const asyncExecutor = async (state: InternalBuilderState): Promise<PageResult<Entity<Infer<TQuery>, Mat, TS>>> => {
+        const { sql: whereSql, params: whereParams } = buildWhereFromNodes(
+          state.nodes,
+          state.includeDeleted ? undefined : softDeleteCol,
+          meta
+        );
+
+        let selectCols = "*";
+        // Ensure PK is in select columns when include is requested (needed for sub-table batch fetching)
+        if (state.include && state.include.length > 0 && state.select && !state.select.includes(pk)) {
+          state.select = [...state.select, pk];
+        }
+        if (state.select && state.select.length > 0) {
+          selectCols = state.select.map((c) => `"${c}"`).join(", ");
+        }
+
+        const orderSql = state.orderBy.length > 0
+          ? "ORDER BY " + state.orderBy.map((o) => `${resolveOrderByColumn(o.column, meta)} ${o.direction}`).join(", ")
+          : "";
+        const limitOffsetParts: string[] = [];
+        const limitOffsetParams: SQLQueryBindings[] = [];
+        const effectiveLimit = state.limit ?? 1000;
+        limitOffsetParts.push("LIMIT ?");
+        limitOffsetParams.push(effectiveLimit);
+        if (state.offset !== undefined) {
+          limitOffsetParts.push("OFFSET ?");
+          limitOffsetParams.push(state.offset);
+        }
+
+        const sql = [
+          `SELECT ${selectCols} FROM "${tableName}"`,
+          whereSql,
+          orderSql,
+          limitOffsetParts.join(" "),
+        ].filter(Boolean).join(" ");
+
+        const countSql = `SELECT COUNT(*) as "_count" FROM "${tableName}" ${whereSql}`.trim();
+
+        const [rows, countRows] = await Promise.all([
+          readScheduler.exec<Record<string, unknown>[]>(sql, [...whereParams, ...limitOffsetParams]),
+          readScheduler.exec<{ _count: number }[]>(countSql, whereParams),
+        ]);
+
+        const countRow = countRows[0] ?? null;
+
+        let results: Entity<Infer<TQuery>, Mat, TS>[];
+        if (state.include && state.include.length > 0) {
+          // Batch-prefetch sub-table rows
+          const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+          const prefetchedBySub = new Map<string, Map<string | number, Record<string, unknown>[]>>();
+          for (const sub of this.meta.subTables) {
+            const inc = state.include.some((name) => name === sub.fieldName);
+            if (!inc || pkValues.length === 0) continue;
+            const ph = pkValues.map(() => "?").join(", ");
+            const subRows = await readScheduler.exec<Record<string, unknown>[]>(
+              `SELECT * FROM "${sub.tableName}" WHERE "_owner_id" IN (${ph}) ORDER BY "_index" ASC`,
+              pkValues
+            );
+            const byOwner = new Map<string | number, Record<string, unknown>[]>();
+            for (const r of subRows) {
+              const owner = r._owner_id;
+              if (typeof owner !== "string" && typeof owner !== "number") continue;
+              if (!byOwner.has(owner)) byOwner.set(owner, []);
+              byOwner.get(owner)!.push(r);
+            }
+            prefetchedBySub.set(sub.tableName, byOwner);
+          }
+
+          results = rows.map((r) => {
+            const rowPrefetched = new Map<string, Record<string, unknown>[]>();
+            for (const sub of this.meta.subTables) {
+              const inc = state.include!.some((name) => name === sub.fieldName);
+              if (!inc) continue;
+              const byOwner = prefetchedBySub.get(sub.tableName);
+              const key = r[pk];
+              const pkVal = typeof key === "string" || typeof key === "number" ? key : undefined;
+              rowPrefetched.set(sub.tableName, pkVal !== undefined ? byOwner?.get(pkVal) ?? [] : []);
+            }
+            return wrap(hydrateOne(r, state.include, state.select, rowPrefetched));
+          });
+        } else {
+          results = rows.map((r) => this._wrapNoSubs(hydrateRow(r, this.meta, EMPTY_MAP, this._codecs, state.select, state.include)));
+        }
+
+        return {
+          data: results,
+          total: (countRow ?? { _count: 0 })._count,
+          limit: state.limit ?? rows.length,
+          offset: state.offset ?? 0,
+        };
+      };
+      return new FilterBuilder<TQuery, PageResult<Entity<Infer<TQuery>, Mat, TS>>>(executor, asyncExecutor);
+    }
+
+    return fb;
   }
 
   /**
@@ -1748,8 +2531,9 @@ export class Repository<
     const tableName = this.tableName;
     const meta = this.meta;
     const queryExecutor = this._executor;
+    const readScheduler = this._readScheduler;
     const softDeleteCol = this.descriptor.softDelete?.column;
-    const wrap = this._wrap.bind(this);
+    const wrap = this._wrapNoSubs.bind(this);
     const hydrateOne = this._hydrateOne.bind(this);
 
     const executor = (state: InternalBuilderState): CursorPageResult<Entity<Infer<TQuery>, Mat, TS>> => {
@@ -1786,7 +2570,46 @@ export class Repository<
       return { data: results, nextCursor, prevCursor };
     };
 
-    return new FilterBuilder<TQuery, CursorPageResult<Entity<Infer<TQuery>, Mat, TS>>>(executor);
+    const fb = new FilterBuilder<TQuery, CursorPageResult<Entity<Infer<TQuery>, Mat, TS>>>(executor);
+
+    if (readScheduler) {
+      const asyncExecutor = async (state: InternalBuilderState): Promise<CursorPageResult<Entity<Infer<TQuery>, Mat, TS>>> => {
+        const { sql: whereSql, params: whereParams } = buildWhereFromNodes(
+          state.nodes,
+          state.includeDeleted ? undefined : softDeleteCol,
+          meta
+        );
+
+        const limit = state.limit ?? 25;
+        const direction = state.orderBy[0]?.direction ?? "ASC";
+        const colRef = state.orderBy.length > 0
+          ? resolveOrderByColumn(state.orderBy[0]!.column, meta)
+          : `"${this.descriptor.primaryKey.name}"`;
+
+        let sql = `SELECT * FROM "${tableName}"`;
+        const params: SQLQueryBindings[] = [...whereParams];
+
+        if (whereSql) sql += ` ${whereSql}`;
+        sql += ` ORDER BY ${colRef} ${direction} LIMIT ${limit}`;
+
+        const rows = await readScheduler.exec<Record<string, unknown>[]>(sql, params);
+
+        let results = rows.map((r) => wrap(hydrateOne(r)));
+
+        const cursorCol = state.orderBy[0]?.column ?? this.descriptor.primaryKey.name;
+        const nextCursor: Cursor | null = results.length === limit
+          ? { column: cursorCol, value: cursorValue(results[results.length - 1] as Record<string, unknown>, cursorCol) }
+          : null;
+        const prevCursor: Cursor | null = results.length > 0
+          ? { column: cursorCol, value: cursorValue(results[0] as Record<string, unknown>, cursorCol) }
+          : null;
+
+        return { data: results, nextCursor, prevCursor };
+      };
+      return new FilterBuilder<TQuery, CursorPageResult<Entity<Infer<TQuery>, Mat, TS>>>(executor, asyncExecutor);
+    }
+
+    return fb;
   }
 
   /**
@@ -1808,6 +2631,7 @@ export class Repository<
     const tableName = this.tableName;
     const meta = this.meta;
     const queryExecutor = this._executor;
+    const readScheduler = this._readScheduler;
     const softDeleteCol = this.descriptor.softDelete?.column;
 
     const executor = (state: AggregateBuilderState): Record<string, unknown>[] => {
@@ -1838,7 +2662,40 @@ export class Repository<
       return queryExecutor.all<Record<string, unknown>>(sql, whereResult.params, "aggregate");
     };
 
-    return new AggregateBuilder<TQuery>(executor);
+    const ab = new AggregateBuilder<TQuery>(executor);
+
+    if (readScheduler) {
+      const asyncExecutor = async (state: AggregateBuilderState): Promise<Record<string, unknown>[]> => {
+        const aggParts: string[] = [];
+        for (const [alias, { op, field }] of Object.entries(state.aggregations)) {
+          const colRef = meta ? (meta.columnByPath.get(field)?.name ?? field) : field;
+          const safeCol = `"${colRef}"`;
+          if (op === "count" && field === "*") {
+            aggParts.push(`COUNT(*) as "${alias}"`);
+          } else {
+            aggParts.push(`${op.toUpperCase()}(${safeCol}) as "${alias}"`);
+          }
+        }
+
+        const whereResult = buildWhereFromNodes([], state.includeDeleted ? undefined : softDeleteCol, meta);
+
+        let sql = `SELECT ${aggParts.join(", ")} FROM "${tableName}"`;
+        if (whereResult.sql) sql += ` ${whereResult.sql}`;
+
+        if (state.groupBy && state.groupBy.length > 0) {
+          const groupCols = state.groupBy.map((c) => {
+            const resolved = meta ? (meta.columnByPath.get(c)?.name ?? c) : c;
+            return `"${resolved}"`;
+          }).join(", ");
+          sql += ` GROUP BY ${groupCols}`;
+        }
+
+        return readScheduler.exec<Record<string, unknown>[]>(sql, whereResult.params);
+      };
+      return new AggregateBuilder<TQuery>(executor, asyncExecutor);
+    }
+
+    return ab;
   }
 
   // --- Update ----------------------------------------------------------------
@@ -1875,7 +2732,7 @@ export class Repository<
 
       traceBegin("repo.update.mergeAndFlatten");
       // Validate by merging with existing to produce a complete schema-valid object
-      const existingObj = hydrateRow(flatRow, this.meta, new Map(), this._codecs);
+      const existingObj = this._hydrateOne(flatRow);
       const merged = this.parse({ ...existingObj, ...data });
       const mergedObj = this._record(merged);
       if (this._timestampNames.updatedAt) {
@@ -1924,7 +2781,7 @@ export class Repository<
         this.db.transaction(doUpdate);
       }
 
-      const result = this._wrap(mergedObj);
+      const result = this._wrapNoSubs(mergedObj);
       this._emit("update", { id: rawPk, data: { ...data } });
       return result;
     });
@@ -2117,7 +2974,7 @@ export class Repository<
         traceBegin("repo.hydrateOne.cleanPrefetched");
         const cleaned = sub.isScalar
           ? rows.map((r) => ({ _value: r._value }))
-          : rows.map((r) => hydrateRow(r, subMeta, new Map(), this._codecs));
+          : rows.map((r) => hydrateRow(r, subMeta, EMPTY_MAP, this._codecs));
         traceEnd({ sub: sub.fieldName, rows: rows.length });
         subRows.set(sub.tableName, cleaned);
         continue;
@@ -2133,7 +2990,7 @@ export class Repository<
 
       const cleaned = sub.isScalar
         ? rows.map((r) => ({ _value: r._value }))
-        : rows.map((r) => hydrateRow(r, subMeta, new Map(), this._codecs));
+        : rows.map((r) => hydrateRow(r, subMeta, EMPTY_MAP, this._codecs));
 
       subRows.set(sub.tableName, cleaned);
     }

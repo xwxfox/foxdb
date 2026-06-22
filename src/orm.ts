@@ -32,6 +32,7 @@ import type { ORMContext, LifecycleHook } from "./lifecycle.ts";
 import { ORMError, raise, currentTrace } from "./errors.ts";
 import { unlinkDbFiles } from "./database.ts";
 import type { TableDescriptor } from "./table.ts";
+import { ReadScheduler } from "./asyncDatabasePool/scheduler.ts";
 
 // --- Options ------------------------------------------------------------------
 
@@ -50,6 +51,8 @@ export interface CreateORMBaseOptions {
   vacuumIntervalMs?: number;
   /** disable fsync during large initial loads */
   bulkLoadMode?: boolean;
+  /** number of worker threads for async read queries (enables *Async methods) */
+  asyncReaderPool?: number;
 }
 
 /**
@@ -244,8 +247,27 @@ export function createORM<
   }
   let accessors: foxdb<T, Rels>;
   const events = new EventBus();
+  let readScheduler: ReadScheduler | undefined;
 
   try {
+    // Create async reader pool if configured
+    // Workers open the same file read-only - incompatible with :memory: (each
+    // connection gets its own isolated memory region, so workers can never see
+    // the writer's data). When path is :memory: we skip the pool and async
+    // methods fall back to Promise.resolve().then(sync) transparently.
+    if (opts.asyncReaderPool && opts.asyncReaderPool >= 1) {
+      const canPool = dbPath !== ":memory:" && dbPath.length > 0;
+      if (canPool) {
+        readScheduler = new ReadScheduler({
+          path: dbPath,
+          cacheSize: opts.cacheSize,
+          busyTimeout: opts.busyTimeout,
+          synchronous: opts.synchronous,
+          mmapSize: opts.mmapSize,
+        }, opts.asyncReaderPool);
+      }
+    }
+
     // Validate tables object
     const tableEntries = Object.entries(opts.tables);
     if (tableEntries.length === 0) {
@@ -287,7 +309,7 @@ export function createORM<
         }
       }
 
-      const repo = new Repository(name, config, db);
+      const repo = new Repository(name, config, db, readScheduler);
       repos.set(name, repo);
     }
 
@@ -876,6 +898,7 @@ export function createORM<
       }
 
       sqlFileClose();
+      readScheduler?.terminate();
       db.close();
 
       lifecycle.runExit(ctx);

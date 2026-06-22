@@ -139,7 +139,6 @@ const orm = createORM({
     unlinkDbFilesOnExit: true,
 });
 
-
 // --- 3. Event System Demo -----------------------------------------------------
 
 console.log("\n--- Event System ---");

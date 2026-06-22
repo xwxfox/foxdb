@@ -492,6 +492,30 @@ export type SelectableKeys<T extends TSchema & { properties: Record<string, TSch
 export type FilterableFields<T extends TSchema & { properties: Record<string, TSchema> }> =
   ScalarKeys<T> | ObjectKeys<T> | ScalarJsonPath<T> | SubTableScalarPath<T>;
 
+/**
+ * Filterable fields excluding sub-table paths.
+ * Used when no sub-tables have been included via .include().
+ * @category Query Types
+ */
+export type FilterableFieldsBase<T extends TSchema & { properties: Record<string, TSchema> }> =
+  ScalarKeys<T> | ObjectKeys<T> | ScalarJsonPath<T>;
+
+/**
+ * Filterable fields that include ONLY sub-table paths for the specified tables.
+ * @internal
+ */
+export type IncludedSubTablePaths<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  I extends string
+> = Extract<SubTableScalarPath<T>, `${I}.${string}`>;
+
+export type FilterableForInclude<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  I extends string | undefined
+> = [I] extends [never] ? FilterableFieldsBase<T>
+  : [I] extends [undefined] ? FilterableFieldsBase<T>
+  : FilterableFieldsBase<T> | IncludedSubTablePaths<T, I & string>;
+
 export type FieldType<
   T extends TSchema & { properties: Record<string, TSchema> },
   P extends FilterableFields<T>

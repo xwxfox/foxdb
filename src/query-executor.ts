@@ -77,7 +77,6 @@ export class QueryExecutor {
   private db: BunDatabase;
   private tableName: string;
   private metricsHook?: (meta: QueryMetrics) => void;
-  private stmtCache = new Map<string, ReturnType<BunDatabase["prepare"]>>();
 
   constructor(opts: QueryExecutorOptions) {
     this.db = opts.db;
@@ -86,11 +85,7 @@ export class QueryExecutor {
   }
 
   private _getStmt(sql: string) {
-    const cached = this.stmtCache.get(sql);
-    if (cached) return cached;
-    const stmt = this.db.prepare(sql);
-    this.stmtCache.set(sql, stmt);
-    return stmt;
+    return this.db.prepare(sql);
   }
 
   private _debugQueryPlan(sql: string, params: SQLQueryBindings[]) {

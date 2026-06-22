@@ -29,6 +29,19 @@ import { traceBegin, traceEnd, sqlDebug } from "./tracing.ts";
 /** @category Advanced */
 export type SqliteType = "TEXT" | "INTEGER" | "REAL" | "BLOB";
 
+/**
+ * Pre-classified decode strategy for hydration.
+ * Avoids per-value heuristic checks by knowing the column's type at schema time.
+ */
+export const enum ColDecode {
+  /** Scalar string or number – pass through, no processing */
+  Scalar = 0,
+  /** JSON object/array stored as TEXT – always JSON.parse */
+  Json = 1,
+  /** Boolean stored as INTEGER – convert 0/1 to false/true */
+  Bool = 2,
+}
+
 /** @category Advanced */
 export interface ColumnMeta {
   name: string;
@@ -46,6 +59,16 @@ export interface ColumnMeta {
   generatedExpr?: string;
   /** Pre-built getter function for flattenRow (set during introspectTable) */
   _get?: (obj: Record<string, unknown>) => unknown;
+  /**
+   * Pre-classified decode strategy for hydration.
+   * Scalar=0 (no processing), Json=1 (JSON.parse), Bool=2 (v===1).
+   */
+  decode?: ColDecode;
+  /**
+   * If path.length <= 1, pre-stored target key for direct property assignment
+   * (avoids branching in the hydration hot loop).
+   */
+  _targetKey?: string;
 }
 
 type SubTableMetaCommon = {
@@ -91,6 +114,11 @@ export interface TableMeta {
   insertColumns: ColumnMeta[];
   /** Precomputed ordered column names for INSERT SQL */
   insertColumnNames: string[];
+  /**
+   * Pre-compiled fast hydration function (no codecs, no select/include filtering).
+   * Populated by introspectTable. Use hydrateRowFastCompiled for the common path.
+   */
+  _hydrateFast?: (flat: Record<string, unknown>) => Record<string, unknown>;
 }
 
 // --- Helpers ------------------------------------------------------------------
@@ -217,19 +245,20 @@ export function buildColumns(
   for (const [name, raw] of Object.entries(properties)) {
     if (IsArray(raw)) {
       const { optional } = unwrapOptional(raw);
-      // Arrays of objects → sub-table ONLY when explicitly told to skip
       if (skipObjectArrays && depth === 0 && IsObject(raw.items)) {
         sqlDebug(`buildColumns skip array ${name}`, { depth, reason: "top-level object array → handled as sub-table" });
         continue;
       }
-      // Everywhere else (inside flattened objects, or sub-tables) → JSON TEXT
       const colName = prefix.length > 0 ? [...prefix, name].join("__") : name;
+      const path = prefix.length > 0 ? [...prefix, name] : undefined;
       cols.push({
         name: colName,
         sqlType: "TEXT",
         nullable: optional,
         optional,
-        path: prefix.length > 0 ? [...prefix, name] : undefined,
+        path,
+        decode: ColDecode.Json,
+        _targetKey: path ? (path.length === 1 ? path[0] : undefined) : colName,
       });
       sqlDebug(`buildColumns array ${name} → ${colName}`, { depth, sqlType: "TEXT", reason: depth === 0 ? "top-level array not of objects → scalar sub-table or JSON TEXT" : "nested array → JSON TEXT" });
       continue;
@@ -246,14 +275,21 @@ export function buildColumns(
     const { schema, optional } = unwrapOptional(raw);
     const nullable = optional || isNullableUnion(schema);
     const colName = prefix.length > 0 ? [...prefix, name].join("__") : name;
+    const path = prefix.length > 0 ? [...prefix, name] : undefined;
     const finalSqlType = IsObject(schema) ? "TEXT" : schemaToSqlType(schema);
+    const isBool = IsBoolean(schema);
+    const decode = isBool ? ColDecode.Bool
+      : IsObject(schema) ? ColDecode.Json
+      : ColDecode.Scalar;
     cols.push({
       name: colName,
       sqlType: finalSqlType,
       nullable,
       optional: nullable,
-      path: prefix.length > 0 ? [...prefix, name] : undefined,
-      isBoolean: IsBoolean(schema),
+      path,
+      isBoolean: isBool,
+      decode,
+      _targetKey: path ? (path.length === 1 ? path[0] : undefined) : colName,
     });
     if (prefix.length > 0) {
       sqlDebug(`buildColumns scalar ${name} → ${colName}`, { depth, sqlType: finalSqlType, nullable, path: [...prefix, name] });
@@ -419,7 +455,175 @@ export function introspectTable(
     }
   }
 
-  return { tableName, columns, subTables, columnByPath, columnByName, primaryKey, insertColumns, insertColumnNames };
+  const meta: TableMeta = {
+    tableName, columns, subTables, columnByPath, columnByName,
+    primaryKey, insertColumns, insertColumnNames,
+  };
+
+  // Fill in decode type for sub-table columns
+  for (const sub of subTables) {
+    for (const c of sub.columns) {
+      if (c.decode === undefined) {
+        c.decode = c.isBoolean ? ColDecode.Bool
+          : c.sqlType === "TEXT" ? ColDecode.Scalar
+          : ColDecode.Scalar;
+      }
+      if (c._targetKey === undefined) {
+        c._targetKey = c.path ? (c.path.length === 1 ? c.path[0] : undefined) : c.name;
+      }
+    }
+  }
+
+  // Pre-compile fast hydration function for this table schema
+  meta._hydrateFast = compileHydrateRowFn(meta);
+
+  return meta;
+}
+
+/**
+ * Pre-compile a fast hydration function for a specific table schema.
+ * Uses a single loop with if/else dispatch — the JIT can predict the Scalar
+ * branch as "not taken" for most columns, matching the common case.
+ */
+export function compileHydrateRowFn(
+  meta: TableMeta,
+  codecs?: Map<string, ColumnCodec>
+): (flat: Record<string, unknown>) => Record<string, unknown> {
+  const cols = meta.columns;
+  const len = cols.length;
+
+  type AssignSpec = { src: string; dst: string; decode: ColDecode };
+  type PathSpec = { src: string; path: string[]; decode: ColDecode };
+
+  const directList: AssignSpec[] = new Array(len);
+  const pathList: PathSpec[] = new Array(len);
+  let hasPath = false;
+
+  for (let i = 0; i < len; i++) {
+    const col = cols[i]!;
+    const decode = col.decode ?? ColDecode.Scalar;
+
+    if (col._targetKey) {
+      directList[i] = { src: col.name, dst: col._targetKey, decode };
+    } else if (col.path) {
+      pathList[i] = { src: col.name, path: col.path, decode };
+      hasPath = true;
+    } else {
+      directList[i] = { src: col.name, dst: col.name, decode };
+    }
+  }
+
+  const hasCodecs = codecs?.size;
+  if (hasCodecs) {
+    const codecMap = codecs!;
+    if (hasPath) {
+      return function hydrateRowCompiledFull(
+        flat: Record<string, unknown>,
+      ): Record<string, unknown> {
+        if (feature("DEBUG_TRACING")) traceBegin("schema.hydrateRowCompiledFull");
+        const obj: Record<string, unknown> = {};
+        for (let i = 0; i < len; i++) {
+          const d = directList[i];
+          if (d) {
+            let v = flat[d.src];
+            const codec = codecMap.get(d.src);
+            if (codec) v = codec.decode(v as DBValue);
+            if (d.decode === ColDecode.Json) {
+              if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+            } else if (d.decode === ColDecode.Bool) {
+              v = v == null ? null : v === 1;
+            }
+            obj[d.dst] = v ?? null;
+          } else {
+            const p = pathList[i]!;
+            let v = flat[p.src];
+            const codec = codecMap.get(p.src);
+            if (codec) v = codec.decode(v as DBValue);
+            if (p.decode === ColDecode.Json) {
+              if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+            } else if (p.decode === ColDecode.Bool) {
+              v = v == null ? null : v === 1;
+            }
+            setValueAtPath(obj, p.path, v ?? null);
+          }
+        }
+        if (feature("DEBUG_TRACING")) traceEnd();
+        return obj;
+      };
+    }
+    return function hydrateRowCompiledCodec(
+      flat: Record<string, unknown>,
+    ): Record<string, unknown> {
+      if (feature("DEBUG_TRACING")) traceBegin("schema.hydrateRowCompiledCodec");
+      const obj: Record<string, unknown> = {};
+      for (let i = 0; i < len; i++) {
+        const d = directList[i]!;
+        let v = flat[d.src];
+        const codec = codecMap.get(d.src);
+        if (codec) v = codec.decode(v as DBValue);
+        if (d.decode === ColDecode.Json) {
+          if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+        } else if (d.decode === ColDecode.Bool) {
+          v = v == null ? null : v === 1;
+        }
+        obj[d.dst] = v ?? null;
+      }
+      if (feature("DEBUG_TRACING")) traceEnd();
+      return obj;
+    };
+  }
+
+  if (hasPath) {
+    return function hydrateRowCompiledPath(
+      flat: Record<string, unknown>,
+    ): Record<string, unknown> {
+      if (feature("DEBUG_TRACING")) traceBegin("schema.hydrateRowCompiledPath");
+      const obj: Record<string, unknown> = {};
+      for (let i = 0; i < len; i++) {
+        const d = directList[i];
+        if (d) {
+          let v = flat[d.src];
+          if (d.decode === ColDecode.Json) {
+            if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+          } else if (d.decode === ColDecode.Bool) {
+            v = v == null ? null : v === 1;
+          }
+          obj[d.dst] = v ?? null;
+        } else {
+          const p = pathList[i]!;
+          let v = flat[p.src];
+          if (p.decode === ColDecode.Json) {
+            if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+          } else if (p.decode === ColDecode.Bool) {
+            v = v == null ? null : v === 1;
+          }
+          setValueAtPath(obj, p.path, v ?? null);
+        }
+      }
+      if (feature("DEBUG_TRACING")) traceEnd();
+      return obj;
+    };
+  }
+
+  // Fastest path: no path assignments, no codecs
+  return function hydrateRowCompiledFast(
+    flat: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (feature("DEBUG_TRACING")) traceBegin("schema.hydrateRowCompiledFast");
+    const obj: Record<string, unknown> = {};
+    for (let i = 0; i < len; i++) {
+      const d = directList[i]!;
+      let v = flat[d.src];
+      if (d.decode === ColDecode.Json) {
+        if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+      } else if (d.decode === ColDecode.Bool) {
+        v = v == null ? null : v === 1;
+      }
+      obj[d.dst] = v ?? null;
+    }
+    if (feature("DEBUG_TRACING")) traceEnd();
+    return obj;
+  };
 }
 
 // --- DDL generation -----------------------------------------------------------
@@ -778,6 +982,9 @@ function hydrateRowCodec(
   return obj;
 }
 
+/** Shared immutable empty Map used across all hydration calls to avoid allocations */
+export const EMPTY_MAP: Map<string, Record<string, unknown>[]> = Object.freeze(new Map()) as Map<string, Record<string, unknown>[]>;
+
 export function hydrateRow(
   flat: Record<string, unknown>,
   meta: TableMeta,
@@ -787,9 +994,10 @@ export function hydrateRow(
   include?: string[]
 ): Record<string, unknown> {
   if (feature("DEBUG_TRACING")) traceBegin("schema.hydrateRow");
-  // Fast path: no codecs, no select, no subTables
+  // Fast path: no codecs, no select, no subTables — use pre-compiled hydrator
   if (!codecs?.size && !select && !meta.subTables.length) {
     if (feature("DEBUG_TRACING")) traceEnd();
+    if (meta._hydrateFast) return meta._hydrateFast(flat);
     return hydrateRowFast(flat, meta);
   }
 
@@ -798,6 +1006,26 @@ export function hydrateRow(
 
   if (!select) {
     if (!hasCodecs) {
+      if (meta._hydrateFast) {
+        // Handle sub-tables after compiled fast hydrate
+        const obj = meta._hydrateFast(flat);
+        for (const sub of meta.subTables) {
+          if (include && !include.includes(sub.fieldName)) {
+            obj[sub.fieldName] = [];
+          } else {
+            const rows = subRows.get(sub.tableName);
+            if (include || rows) {
+              if (sub.isScalar) {
+                obj[sub.fieldName] = (rows ?? []).map(r => decodeValue(r._value, sub.scalarType));
+              } else {
+                obj[sub.fieldName] = rows ?? [];
+              }
+            }
+          }
+        }
+        if (feature("DEBUG_TRACING")) traceEnd();
+        return obj;
+      }
       hydrateRowFastOutput(flat, meta, obj);
     } else {
       hydrateRowCodecOutput(flat, meta, codecs!, obj);
@@ -857,11 +1085,15 @@ export function hydrateRow(
   for (const sub of meta.subTables) {
     if (include && !include.includes(sub.fieldName)) {
       obj[sub.fieldName] = [];
-    } else if (sub.isScalar) {
-      const rows = subRows.get(sub.tableName) ?? [];
-      obj[sub.fieldName] = rows.map(r => decodeValue(r._value, sub.scalarType));
     } else {
-      obj[sub.fieldName] = subRows.get(sub.tableName) ?? [];
+      const rows = subRows.get(sub.tableName);
+      if (include || rows) {
+        if (sub.isScalar) {
+          obj[sub.fieldName] = (rows ?? []).map(r => decodeValue(r._value, sub.scalarType));
+        } else {
+          obj[sub.fieldName] = rows ?? [];
+        }
+      }
     }
   }
 

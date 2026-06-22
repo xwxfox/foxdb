@@ -1,6 +1,8 @@
 import type { TSchema } from "typebox";
 import type {
   FilterableFields,
+  FilterableFieldsBase,
+  FilterableForInclude,
   FieldType,
   ArrayFilterableFields,
   ArrayItemType,
@@ -154,7 +156,8 @@ export function buildWhereFromNodes(
 
 export class FilterBuilder<
   TQuery extends TSchema & { properties: Record<string, TSchema> },
-  TResult
+  TResult,
+  I extends SubTableKeys<TQuery> | undefined = undefined
 > {
   _nodes: ConditionNode[] = [];
   private _orderByFields: Array<{ column: string; direction: "ASC" | "DESC" }> = [];
@@ -167,7 +170,8 @@ export class FilterBuilder<
   private _distinctOnFields: string[] | undefined;
 
   constructor(
-    private _executor?: (state: InternalBuilderState) => TResult
+    private _executor?: (state: InternalBuilderState) => TResult,
+    private _asyncExecutor?: (state: InternalBuilderState) => Promise<TResult>
   ) { }
 
   private _assertExecutor(): (state: InternalBuilderState) => TResult {
@@ -193,7 +197,7 @@ export class FilterBuilder<
 
   // --- Equality operators ---------------------------------------------------
 
-  equals<P extends FilterableFields<TQuery>>(
+  equals<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     value: FieldType<TQuery, P>
   ): this {
@@ -201,7 +205,7 @@ export class FilterBuilder<
     return this;
   }
 
-  notEquals<P extends FilterableFields<TQuery>>(
+  notEquals<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     value: FieldType<TQuery, P>
   ): this {
@@ -211,7 +215,7 @@ export class FilterBuilder<
 
   // --- Comparison operators ------------------------------------------------
 
-  greaterThan<P extends FilterableFields<TQuery>>(
+  greaterThan<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     value: FieldType<TQuery, P>
   ): this {
@@ -219,7 +223,7 @@ export class FilterBuilder<
     return this;
   }
 
-  greaterThanOrEqual<P extends FilterableFields<TQuery>>(
+  greaterThanOrEqual<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     value: FieldType<TQuery, P>
   ): this {
@@ -227,7 +231,7 @@ export class FilterBuilder<
     return this;
   }
 
-  lessThan<P extends FilterableFields<TQuery>>(
+  lessThan<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     value: FieldType<TQuery, P>
   ): this {
@@ -235,7 +239,7 @@ export class FilterBuilder<
     return this;
   }
 
-  lessThanOrEqual<P extends FilterableFields<TQuery>>(
+  lessThanOrEqual<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     value: FieldType<TQuery, P>
   ): this {
@@ -245,7 +249,7 @@ export class FilterBuilder<
 
   // --- Range --------------------------------------------------------------
 
-  between<P extends FilterableFields<TQuery>>(
+  between<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     min: FieldType<TQuery, P>,
     max: FieldType<TQuery, P>
@@ -260,7 +264,7 @@ export class FilterBuilder<
 
   // --- String pattern matching --------------------------------------------
 
-  like<P extends FilterableFields<TQuery>>(
+  like<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     pattern: string
   ): this {
@@ -268,7 +272,7 @@ export class FilterBuilder<
     return this;
   }
 
-  contains<P extends FilterableFields<TQuery>>(
+  contains<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     substring: string
   ): this {
@@ -280,7 +284,7 @@ export class FilterBuilder<
     return this;
   }
 
-  startsWith<P extends FilterableFields<TQuery>>(
+  startsWith<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     prefix: string
   ): this {
@@ -292,7 +296,7 @@ export class FilterBuilder<
     return this;
   }
 
-  endsWith<P extends FilterableFields<TQuery>>(
+  endsWith<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     suffix: string
   ): this {
@@ -306,7 +310,7 @@ export class FilterBuilder<
 
   // --- Set operators ------------------------------------------------------
 
-  in<P extends FilterableFields<TQuery>>(
+  in<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     values: FieldType<TQuery, P>[]
   ): this {
@@ -314,7 +318,7 @@ export class FilterBuilder<
     return this;
   }
 
-  notIn<P extends FilterableFields<TQuery>>(
+  notIn<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     values: FieldType<TQuery, P>[]
   ): this {
@@ -324,12 +328,12 @@ export class FilterBuilder<
 
   // --- Null operators -----------------------------------------------------
 
-  isNull<P extends FilterableFields<TQuery>>(field: P): this {
+  isNull<P extends FilterableForInclude<TQuery, I>>(field: P): this {
     this._nodes.push({ type: "condition", field, filter: { isNull: true } satisfies FilterShape });
     return this;
   }
 
-  isNotNull<P extends FilterableFields<TQuery>>(field: P): this {
+  isNotNull<P extends FilterableForInclude<TQuery, I>>(field: P): this {
     this._nodes.push({
       type: "condition",
       field,
@@ -412,7 +416,7 @@ export class FilterBuilder<
     );
   }
 
-  nested<P extends FilterableFields<TQuery>>(
+  nested<P extends FilterableForInclude<TQuery, I>>(
     field: P,
     callback: (q: FilterBuilder<TQuery, unknown>) => void
   ): this {
@@ -504,9 +508,9 @@ export class FilterBuilder<
     return this;
   }
 
-  include<I extends SubTableKeys<TQuery>[]>(...relations: I): this {
+  include<Inc extends SubTableKeys<TQuery>[]>(...relations: Inc): FilterBuilder<TQuery, TResult, Inc[number]> {
     this._includeFields = relations;
-    return this;
+    return this as unknown as FilterBuilder<TQuery, TResult, Inc[number]>;
   }
 
   // --- Distinct -----------------------------------------------------------
@@ -536,8 +540,12 @@ export class FilterBuilder<
   }
 
   execAsync(): Promise<TResult> {
+    const state = this._collectState();
+    if (this._asyncExecutor) {
+      return this._asyncExecutor(state);
+    }
     const executor = this._assertExecutor();
-    return Promise.resolve().then(() => executor(this._collectState()));
+    return Promise.resolve().then(() => executor(state));
   }
 
   execThrowable(): TResult {
@@ -565,7 +573,8 @@ export class AggregateBuilder<
   private _includeDeletedValue: boolean = false;
 
   constructor(
-    private _executor: (state: AggregateBuilderState) => Record<string, unknown>[]
+    private _executor: (state: AggregateBuilderState) => Record<string, unknown>[],
+    private _asyncExecutor?: (state: AggregateBuilderState) => Promise<Record<string, unknown>[]>
   ) { }
 
   sum(field: string, alias: string): this {
@@ -620,6 +629,15 @@ export class AggregateBuilder<
   }
 
   execAsync(): Promise<Record<string, unknown>[]> {
-    return Promise.resolve().then(() => this.exec());
+    const state = {
+      aggregations: this._aggregations,
+      groupBy: this._groupByFields,
+      having: this._havingNodes,
+      includeDeleted: this._includeDeletedValue,
+    };
+    if (this._asyncExecutor) {
+      return this._asyncExecutor(state);
+    }
+    return Promise.resolve().then(() => this._executor(state));
   }
 }
