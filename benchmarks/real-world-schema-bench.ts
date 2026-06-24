@@ -11,10 +11,12 @@ function makeORM(indexed = false) {
     // path: ":memory:",
     path: "./bench.db",
     rebuildOnLaunch: true,
+
     tables: {
       sales: table(SaleSchema, (s) => ({
         primaryKey: s.OrderNumber,
         indexes: indexed ? [{ columns: [s.Status__Group] }] : [],
+        autoIndex: false
       })),
     },
   });

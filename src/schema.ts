@@ -707,19 +707,26 @@ export function buildCreateTableSQL(
       sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxOwner, reason: "FK index for hydration + CASCADE lookups" });
 
       if (autoIndex) {
+        const MAX_AUTO = 3;
         let autoIndexed = 0;
-        for (const col of sub.columns) {
-          if (!col.path && col.sqlType === "TEXT") {
-            const idxCol = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__${col.name}" ON "${sub.tableName}" ("${col.name}")`;
-            stmts.push(idxCol);
-            autoIndexed++;
-            sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxCol, reason: `auto-index TEXT column "${col.name}" for WHERE / ORDER BY` });
-          }
+        const candidates = sub.columns.filter((col) => col.sqlType === "TEXT");
+        const nonNullCandidates = candidates.filter((col) => !col.nullable);
+        const nullCandidates = candidates.filter((col) => col.nullable);
+        const ordered = [...nonNullCandidates, ...nullCandidates];
+        for (const col of ordered) {
+          if (autoIndexed >= MAX_AUTO) break;
+          const upper = col.name.toUpperCase();
+          if (upper.endsWith("DATE") || upper.endsWith("AT") || upper.endsWith("TIME")) continue;
+          const idxCol = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__${col.name}" ON "${sub.tableName}" ("${col.name}")`;
+          stmts.push(idxCol);
+          autoIndexed++;
+          sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxCol, reason: `auto-index TEXT column "${col.name}" for WHERE / ORDER BY` });
         }
         sqlDebug(`ddl.autoIndex summary for ${sub.tableName}`, {
           autoIndexed,
-          totalColumns: sub.columns.length,
-          note: autoIndexed > 0 ? "TEXT columns auto-indexed. Set autoIndex: false in table() to disable." : "no TEXT columns to auto-index",
+          totalCandidates: candidates.length,
+          capped: autoIndexed >= MAX_AUTO,
+          note: autoIndexed > 0 ? `TEXT columns auto-indexed (max ${MAX_AUTO}). Set autoIndex: false in table() to disable.` : "no suitable TEXT columns to auto-index",
         });
       } else {
         sqlDebug(`ddl.autoIndex summary for ${sub.tableName}`, { autoIndexed: 0, note: "autoIndex disabled. only _owner_id indexed." });
@@ -855,45 +862,45 @@ export function flattenSubRows(
   codecs?: Map<string, ColumnCodec>
 ): Array<Record<string, unknown>> {
   if (feature("DEBUG_TRACING")) traceBegin("schema.flattenSubRows");
-  try {
-    if (sub.isScalar) {
-      const result: Array<Record<string, unknown>> = new Array(items.length);
-      for (let idx = 0; idx < items.length; idx++) {
-        const v = items[idx];
-        result[idx] = {
-          _owner_id: ownerPk,
-          _index: idx,
-          _value: encodeValue(v, sub.scalarType),
-        };
-      }
-      return result;
-    }
+  if (sub.isScalar) {
     const result: Array<Record<string, unknown>> = new Array(items.length);
-    const hasCodecs = codecs?.size;
     for (let idx = 0; idx < items.length; idx++) {
-      const item = items[idx];
-      if (item === null || typeof item !== "object") {
-        throw new TypeError("Sub-table item must be an object");
-      }
-      const obj = asRecord(item);
-      const row: Record<string, unknown> = {
+      const v = items[idx];
+      result[idx] = {
         _owner_id: ownerPk,
         _index: idx,
+        _value: encodeValue(v, sub.scalarType),
       };
-      for (const col of sub.columns) {
-        const v = col.path ? getValueAtPath(obj, col.path) : obj[col.name];
-        const encoded = encodeValue(v, col.sqlType);
-        if (hasCodecs) {
-          const codec = codecs!.get(col.name);
-          row[col.name] = codec ? codec.encode(encoded) : encoded;
-        } else {
-          row[col.name] = encoded;
-        }
-      }
-      result[idx] = row;
     }
+    if (feature("DEBUG_TRACING")) traceEnd();
     return result;
-  } finally { if (feature("DEBUG_TRACING")) traceEnd(); }
+  }
+  const result: Array<Record<string, unknown>> = new Array(items.length);
+  const hasCodecs = codecs?.size;
+  for (let idx = 0; idx < items.length; idx++) {
+    const item = items[idx];
+    if (item === null || typeof item !== "object") {
+      throw new TypeError("Sub-table item must be an object");
+    }
+    const obj = asRecord(item);
+    const row: Record<string, unknown> = {
+      _owner_id: ownerPk,
+      _index: idx,
+    };
+    for (const col of sub.columns) {
+      const v = col.path ? getValueAtPath(obj, col.path) : obj[col.name];
+      const encoded = encodeValue(v, col.sqlType);
+      if (hasCodecs) {
+        const codec = codecs!.get(col.name);
+        row[col.name] = codec ? codec.encode(encoded) : encoded;
+      } else {
+        row[col.name] = encoded;
+      }
+    }
+    result[idx] = row;
+  }
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return result;
 }
 
 export type SqliteScalar = string | number | boolean | null | bigint;
