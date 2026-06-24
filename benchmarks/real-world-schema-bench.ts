@@ -1,7 +1,6 @@
 import { createORM, table } from "../src/index.ts";
 import { SaleSchema } from "../tests/real-world-types/index.ts";
 import type { Sale } from "../tests/real-world-types/index.ts";
-import { resetTrace, printTraceSummary } from "../src/tracing.ts";
 
 const WARMUP_MS = 500;
 const MAX_TEST_MS = 10000;
@@ -214,7 +213,6 @@ function mem(): { rssMB: number; heapMB: number } {
 
 async function runBenchmark(name: string, fn: (count: number) => void | Promise<void>): Promise<void> {
   console.log(`\n--- ${name} ---`);
-  resetTrace();
   let count = 100;
   const startTime = Date.now();
 
@@ -253,7 +251,6 @@ async function runBenchmark(name: string, fn: (count: number) => void | Promise<
     count *= PROGRESSION_FACTOR;
     Bun.gc(true);
   }
-  printTraceSummary();
 }
 
 // Warmup

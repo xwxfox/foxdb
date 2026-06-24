@@ -171,6 +171,7 @@ export class Repository<
   private readonly _insertColsSql: string;
   private readonly _insertPlaceholders: string;
   private readonly _readScheduler?: ReadScheduler;
+  private readonly _allColumnNames: string[];
 
   /** @internal */
   setEventBus(bus: EventBus): void {
@@ -246,6 +247,8 @@ export class Repository<
         col.sqlType = "BLOB";
       }
     }
+
+    this._allColumnNames = this.meta.columns.map((c) => c.name);
 
     // Prebuild INSERT SQL template (columns never change per table)
     this._insertColsSql = this.meta.insertColumnNames.map((k) => `"${k}"`).join(", ");
@@ -1582,7 +1585,7 @@ export class Repository<
       limit: opts.limit ?? 1000,
     };
     const { sql, params } = buildSelect(this.tableName, resolvedOpts, this.descriptor.softDelete?.column, this.meta);
-    const rows = await this._readScheduler.exec<Record<string, unknown>[]>(sql, params);
+    const rows = await this._readScheduler.execWithCols(sql, params, this._allColumnNames);
 
     const pk = this.descriptor.primaryKey.name;
     const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
@@ -1643,7 +1646,7 @@ export class Repository<
     }
     const resolvedOpts = opts.select && opts.include ? this._ensureSelectPk(opts) : opts;
     const { sql, params } = buildSelect(this.tableName, { ...resolvedOpts, limit: 1 }, this.descriptor.softDelete?.column, this.meta);
-    const rows = await this._readScheduler.exec<Record<string, unknown>[]>(sql, params);
+    const rows = await this._readScheduler.execWithCols(sql, params, this._allColumnNames);
     const row = rows[0] ?? null;
     const result = row ? this._wrapNoSubs(this._hydrateOne(row, opts.include, opts.select)) : null;
     this._emit("findOne", { options: opts, result });
@@ -1665,7 +1668,7 @@ export class Repository<
     const { sql, params, countSql, countParams } = buildSelect(this.tableName, resolvedOpts, this.descriptor.softDelete?.column, this.meta);
 
     const [rows, countRows] = await Promise.all([
-      this._readScheduler.exec<Record<string, unknown>[]>(sql, params),
+      this._readScheduler.execWithCols(sql, params, this._allColumnNames),
       this._readScheduler.exec<{ _count: number }[]>(countSql, countParams),
     ]);
 
@@ -1780,7 +1783,7 @@ export class Repository<
 
     sql += ` ORDER BY ${colRef} ${queryDirection} LIMIT ${limit}`;
 
-    const rows = await this._readScheduler.exec<Record<string, unknown>[]>(sql, params);
+    const rows = await this._readScheduler.execWithCols(sql, params, this._allColumnNames);
 
     let results = rows.map((r) => this._wrapNoSubs(this._hydrateOne(r)));
     if (opts.cursor?.direction === "prev") {
@@ -1856,7 +1859,7 @@ export class Repository<
     const sql = this.descriptor.softDelete
       ? `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? AND "${this.descriptor.softDelete.column}" IS NULL LIMIT 1`
       : `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? LIMIT 1`;
-    const rows = await this._readScheduler.exec<Record<string, unknown>[]>(sql, [id as string | number | bigint | null]);
+    const rows = await this._readScheduler.execWithCols(sql, [id as string | number | bigint | null], this._allColumnNames);
     const row = rows[0] ?? null;
     const result = row ? this._wrap(this._hydrateOne(row)) : null;
     this._emit("findById", { id, result });
@@ -2079,7 +2082,9 @@ export class Repository<
           limitOffsetParts.join(" "),
         ].filter(Boolean).join(" ");
 
-        const rows = await readScheduler.exec<Record<string, unknown>[]>(sql, [...whereParams, ...limitOffsetParams]);
+        const rows = selectCols === "*"
+          ? await readScheduler.execWithCols(sql, [...whereParams, ...limitOffsetParams], this._allColumnNames)
+          : await readScheduler.exec<Record<string, unknown>[]>(sql, [...whereParams, ...limitOffsetParams]);
 
         const pkValues = rows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
 
@@ -2222,7 +2227,9 @@ export class Repository<
           "LIMIT 1",
         ].filter(Boolean).join(" ");
 
-        const rows = await readScheduler.exec<Record<string, unknown>[]>(sql, whereParams);
+        const rows = selectCols === "*"
+          ? await readScheduler.execWithCols(sql, whereParams, this._allColumnNames)
+          : await readScheduler.exec<Record<string, unknown>[]>(sql, whereParams);
         const row = rows[0] ?? null;
 
         if (!row) {
@@ -2455,7 +2462,9 @@ export class Repository<
         const countSql = `SELECT COUNT(*) as "_count" FROM "${tableName}" ${whereSql}`.trim();
 
         const [rows, countRows] = await Promise.all([
-          readScheduler.exec<Record<string, unknown>[]>(sql, [...whereParams, ...limitOffsetParams]),
+          selectCols === "*"
+            ? readScheduler.execWithCols(sql, [...whereParams, ...limitOffsetParams], this._allColumnNames)
+            : readScheduler.exec<Record<string, unknown>[]>(sql, [...whereParams, ...limitOffsetParams]),
           readScheduler.exec<{ _count: number }[]>(countSql, whereParams),
         ]);
 
@@ -2592,7 +2601,7 @@ export class Repository<
         if (whereSql) sql += ` ${whereSql}`;
         sql += ` ORDER BY ${colRef} ${direction} LIMIT ${limit}`;
 
-        const rows = await readScheduler.exec<Record<string, unknown>[]>(sql, params);
+        const rows = await readScheduler.execWithCols(sql, params, this._allColumnNames);
 
         let results = rows.map((r) => wrap(hydrateOne(r)));
 

@@ -31,10 +31,11 @@ const MAX_CACHE_SIZE = 256;
 const stmtCache = new Map<string, any>();
 
 function evictOldestEntry(): void {
-    for (const [key, stmt] of stmtCache.entries()) {
-        try { stmt.finalize(); } catch { }
-        stmtCache.delete(key);
-        break;
+    const firstKey = stmtCache.keys().next().value;
+    if (firstKey !== undefined) {
+        const stmt = stmtCache.get(firstKey);
+        try { stmt?.finalize(); } catch { }
+        stmtCache.delete(firstKey);
     }
 }
 
