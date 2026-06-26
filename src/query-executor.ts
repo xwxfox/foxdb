@@ -113,7 +113,6 @@ export class QueryExecutor {
       // sqlDebug(`plan for ${this.tableName}`, { operation: "read", sql: normalized, params, planSql, planMs, rows });
       const stmtStats = this.db.getStmtStats(sql);
       const stmt = parseStmtStats(stmtStats)!;
-      console.log(stmt)
       const costAnalysis = analyzeCost(
         rows,
         stmt,
