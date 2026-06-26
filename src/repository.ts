@@ -159,6 +159,8 @@ export class Repository<
   >;
   private _entityProto: object | null = null;
   private readonly _timestampNames: { createdAt: string | null; updatedAt: string | null };
+  private readonly _hasTimestamps: boolean;
+  private readonly _hasEviction: boolean;
   private _materialize?: (
     record: Record<string, unknown>
   ) => Record<string, unknown>;
@@ -222,7 +224,6 @@ export class Repository<
             sqlType: "INTEGER",
             nullable: false,
             optional: false,
-            _get: (obj: Record<string, unknown>) => obj[colName],
           };
           this.meta.columns.push(col);
           this.meta.columnByName.set(colName, col);
@@ -234,6 +235,8 @@ export class Repository<
     }
 
     this._timestampNames = resolveTimestampNames(config.timestamps, this.meta);
+    this._hasTimestamps = !!(this._timestampNames.createdAt || this._timestampNames.updatedAt);
+    this._hasEviction = !!config.eviction;
     this.validator = Compile(config.schema);
 
     const codecs = new Map<string, ColumnCodec>();
@@ -622,52 +625,60 @@ export class Repository<
       const obj = this._record(parsed);
       traceEnd();
       const now = Date.now();
-      if (this._timestampNames.createdAt) obj[this._timestampNames.createdAt] = now;
-      if (this._timestampNames.updatedAt) obj[this._timestampNames.updatedAt] = now;
-
-      const doInsert = () => {
-        traceBegin("repo.insert.flatten");
-        const flat = flattenRow(obj, this.meta, this._codecs);
-        traceEnd();
-
-        traceBegin("repo.insert.execMain");
-        const params = this.meta.insertColumnNames.map((k) => flat[k] as SQLQueryBindings);
-        this._executor.exec(
-          `INSERT INTO "${this.tableName}" (${this._insertColsSql}) VALUES (${this._insertPlaceholders})`,
-          params,
-          "insert"
-        );
-        traceEnd();
-
-        const pkVal = obj[this.descriptor.primaryKey.name];
-
-        traceBegin("repo.insert.subTables");
-        for (const sub of this.meta.subTables) {
-          const items = obj[sub.fieldName];
-          if (!globalThis.Array.isArray(items) || items.length === 0) continue;
-          const rows = flattenSubRows(this._assertPk(pkVal), items, sub, this._codecs);
-          if (rows.length > 0) {
-            const batches = buildInsertMany(sub.tableName, rows, 999, sub.insertColsSql, sub.insertValueGroup, sub.insertColumnNames);
-            for (const { sql, params: iParams } of batches) {
-              this._executor.exec(sql, iParams, "insert");
-            }
-          }
-        }
-        traceEnd();
-      };
-
+      if (this._hasTimestamps) {
+        if (this._timestampNames.createdAt) obj[this._timestampNames.createdAt] = now;
+        if (this._timestampNames.updatedAt) obj[this._timestampNames.updatedAt] = now;
+      }
       if (this.db._txDepth > 0) {
-        doInsert();
+        this._insertRow(obj);
       } else {
-        this.db.transaction(doInsert);
+        this.db.transaction(() => this._insertRow(obj));
       }
 
-      if (this.descriptor.eviction) {
+      if (this._hasEviction) {
         this._runEviction();
       }
       this._emit("insert", { data: obj });
       return this._wrapNoSubs(obj);
     });
+  }
+
+  private _insertRow(obj: Record<string, unknown>): void {
+    traceBegin("repo.insert.flatten");
+    const flat = flattenRow(obj, this.meta, this._codecs);
+    traceEnd();
+
+    traceBegin("repo.insert.execMain");
+    const colsLen = this.meta.insertColumns.length;
+    const params = new Array<SQLQueryBindings>(colsLen);
+    for (let i = 0; i < colsLen; i++) {
+      params[i] = flat[this.meta.insertColumns[i]!.name] as SQLQueryBindings;
+    }
+    this._executor.exec(
+      `INSERT INTO "${this.tableName}" (${this._insertColsSql}) VALUES (${this._insertPlaceholders})`,
+      params,
+      "insert"
+    );
+    traceEnd();
+
+    const pkVal = obj[this.descriptor.primaryKey.name];
+
+    traceBegin("repo.insert.subTables");
+    const subs = this.meta.subTables;
+    const subsLen = subs.length;
+    for (let si = 0; si < subsLen; si++) {
+      const sub = subs[si]!;
+      const items = obj[sub.fieldName];
+      if (!globalThis.Array.isArray(items) || items.length === 0) continue;
+      const rows = flattenSubRows(this._assertPk(pkVal), items, sub, this._codecs);
+      if (rows.length > 0) {
+        const batches = buildInsertMany(sub.tableName, rows, 999, sub.insertColsSql, sub.insertValueGroup, sub.insertColumnNames);
+        for (const { sql, params: iParams } of batches) {
+          this._executor.exec(sql, iParams, "insert");
+        }
+      }
+    }
+    traceEnd();
   }
 
   /**
@@ -731,7 +742,7 @@ export class Repository<
         traceEnd();
       });
 
-      if (this.descriptor.eviction) {
+      if (this._hasEviction) {
         this._runEviction();
       }
       this._emit("insertMany", { data: objs });
@@ -758,13 +769,15 @@ export class Repository<
         const parsed = self.parse(data);
         const obj = self._record(parsed);
         const now = Date.now();
-        if (self._timestampNames.createdAt) obj[self._timestampNames.createdAt] = now;
-        if (self._timestampNames.updatedAt) obj[self._timestampNames.updatedAt] = now;
+        if (self._hasTimestamps) {
+          if (self._timestampNames.createdAt) obj[self._timestampNames.createdAt] = now;
+          if (self._timestampNames.updatedAt) obj[self._timestampNames.updatedAt] = now;
+        }
         return flattenRow(obj, self.meta, self._codecs);
       },
       onFlush(rows: Record<string, unknown>[]) {
         self._emit("insertMany", { data: rows });
-        if (self.descriptor.eviction && Math.random() < 0.2) {
+        if (self._hasEviction && Math.random() < 0.2) {
           self._runEviction();
         }
       },
@@ -792,9 +805,10 @@ export class Repository<
       const parsed = this.parse(opts.data);
       const obj = this._record(parsed);
       const now = Date.now();
-      if (this._timestampNames.createdAt) obj[this._timestampNames.createdAt] = now;
-      if (this._timestampNames.updatedAt) obj[this._timestampNames.updatedAt] = now;
-      const flat = flattenRow(obj, this.meta, this._codecs);
+      if (this._hasTimestamps) {
+        if (this._timestampNames.createdAt) obj[this._timestampNames.createdAt] = now;
+        if (this._timestampNames.updatedAt) obj[this._timestampNames.updatedAt] = now;
+      } const flat = flattenRow(obj, this.meta, this._codecs);
 
       const conflictCols: string[] = (
         globalThis.Array.isArray(opts.conflictTarget)
@@ -844,7 +858,7 @@ export class Repository<
         }
       });
 
-      if (this.descriptor.eviction) {
+      if (this._hasEviction) {
         this._runEviction();
       }
       this._emit("upsert", { data: parsed });
@@ -932,7 +946,7 @@ export class Repository<
         }
       });
 
-      if (this.descriptor.eviction) {
+      if (this._hasEviction) {
         this._runEviction();
       }
       this._emit("upsertMany", { data: objs, result: totalChanges });
@@ -1021,8 +1035,8 @@ export class Repository<
 
 
       // Probabilistic LRU touch - batched into a single UPDATE
-      if (this.descriptor.eviction?.lruColumn) {
-        const lruCol = this.descriptor.eviction.lruColumn;
+      if (this._hasEviction && this.descriptor.eviction!.lruColumn) {
+        const lruCol = this.descriptor.eviction!.lruColumn;
         const pk = this.descriptor.primaryKey.name;
         const touchPks: (string | number)[] = [];
         for (const row of rows) {
@@ -2747,14 +2761,14 @@ export class Repository<
       const existingObj = this._hydrateOne(flatRow);
       const merged = this.parse({ ...existingObj, ...data });
       const mergedObj = this._record(merged);
-      if (this._timestampNames.updatedAt) {
+      if (this._hasTimestamps && this._timestampNames.updatedAt) {
         mergedObj[this._timestampNames.updatedAt] = Date.now();
       }
       // Build patch from user's data only -- only touch columns the user provided
       const userObj = this._record(data as Infer<TWrite>);
       const patch = flattenPatch(userObj, this.meta, this._codecs);
       delete patch[pk];
-      if (this._timestampNames.updatedAt) patch[this._timestampNames.updatedAt] = mergedObj[this._timestampNames.updatedAt];
+      if (this._hasTimestamps && this._timestampNames.updatedAt) patch[this._timestampNames.updatedAt] = mergedObj[this._timestampNames.updatedAt];
       traceEnd();
 
       const doUpdate = () => {
@@ -2817,7 +2831,7 @@ export class Repository<
     return withTrace("repository.updateWhere", { table: this.tableName }, () => {
       const obj = this._record(opts.data as Infer<TWrite>);
       const patch = flattenPatch(obj, this.meta, this._codecs);
-      if (this._timestampNames.updatedAt && this._timestampNames.updatedAt in patch === false) {
+      if (this._hasTimestamps && this._timestampNames.updatedAt && this._timestampNames.updatedAt in patch === false) {
         patch[this._timestampNames.updatedAt] = Date.now();
       }
 
@@ -2911,7 +2925,7 @@ export class Repository<
 
       const { sql: whereSql, params } = buildWhere(where, undefined, this.meta);
 
-      // FoxDB handles sub-table cascade — find affected PKs first
+      // FoxDB handles sub-table cascade - find affected PKs first
       if (this._onDeleteBehavior === "foxdb" && this.meta.subTables.length > 0) {
         const pkSql = `SELECT "${pk}" FROM "${this.tableName}" ${whereSql}`.trim();
         const pkRows = this._executor.all<Record<string, unknown>>(pkSql, params, "read");

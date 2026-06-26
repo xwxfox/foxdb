@@ -400,27 +400,8 @@ export function introspectTable(
   const insertColumns = columns.filter((c) => !c.generated);
   const insertColumnNames = insertColumns.map((c) => c.name);
 
-  // Pre-build getter functions for flattenRow
-  for (const col of insertColumns) {
-    if (col.path) {
-      const p = col.path;
-      if (p.length === 1) {
-        const k = p[0]!;
-        col._get = (obj: Record<string, unknown>) => (k in obj ? obj[k] : undefined);
-      } else if (p.length === 2) {
-        const k1 = p[0]!, k2 = p[1]!;
-        col._get = (obj: Record<string, unknown>) => {
-          const o = obj[k1];
-          return o && typeof o === "object" ? (o as Record<string, unknown>)[k2] : undefined;
-        };
-      } else {
-        col._get = (obj: Record<string, unknown>) => getValueAtPath(obj, p);
-      }
-    } else {
-      const k = col.name;
-      col._get = (obj: Record<string, unknown>) => obj[k];
-    }
-  }
+  // _get closures are no longer pre-built to avoid megamorphic call sites.
+  // flattenRow now uses the monomorphic pattern: col.path ? getValueAtPath(...) : obj[col.name]
 
   const meta: TableMeta = {
     tableName, columns, subTables, columnByPath, columnByName,
@@ -449,7 +430,7 @@ export function introspectTable(
 
 /**
  * Pre-compile a fast hydration function for a specific table schema.
- * Uses a single loop with if/else dispatch — the JIT can predict the Scalar
+ * Uses a single loop with if/else dispatch - the JIT can predict the Scalar
  * branch as "not taken" for most columns, matching the common case.
  */
 export function compileHydrateRowFn(
@@ -742,10 +723,13 @@ export function flattenRow(
   codecs?: Map<string, ColumnCodec>
 ): Record<string, unknown> {
   if (feature("DEBUG_TRACING")) traceBegin("schema.flattenRow");
-  const row: Record<string, unknown> = {};
+  const cols = meta.insertColumns;
+  const len = cols.length;
   const hasCodecs = codecs?.size;
-  for (const col of meta.insertColumns) {
-    const v = col._get!(obj);
+  const row: Record<string, unknown> = Object.create(null);
+  for (let i = 0; i < len; i++) {
+    const col = cols[i]!;
+    const v = col.path ? getValueAtPath(obj, col.path) : obj[col.name];
     const encoded = encodeValue(v, col.sqlType);
     if (hasCodecs) {
       const codec = codecs!.get(col.name);
@@ -768,9 +752,12 @@ export function flattenPatch(
   codecs?: Map<string, ColumnCodec>
 ): Record<string, unknown> {
   if (feature("DEBUG_TRACING")) traceBegin("schema.flattenPatch");
-  const row: Record<string, unknown> = {};
+  const cols = meta.insertColumns;
+  const len = cols.length;
   const hasCodecs = codecs?.size;
-  for (const col of meta.insertColumns) {
+  const row: Record<string, unknown> = {};
+  for (let i = 0; i < len; i++) {
+    const col = cols[i]!;
     if (!(col.name in obj) && !col.path) continue;
     let v: unknown;
     if (col.path) {
@@ -801,6 +788,8 @@ export function flattenSubRows(
   codecs?: Map<string, ColumnCodec>
 ): Array<Record<string, unknown>> {
   if (feature("DEBUG_TRACING")) traceBegin("schema.flattenSubRows");
+  const subCols = sub.columns;
+  const subColsLen = subCols.length;
   const result: Array<Record<string, unknown>> = new Array(items.length);
   const hasCodecs = codecs?.size;
   for (let idx = 0; idx < items.length; idx++) {
@@ -813,7 +802,8 @@ export function flattenSubRows(
       _owner_id: ownerPk,
       _index: idx,
     };
-    for (const col of sub.columns) {
+    for (let ci = 0; ci < subColsLen; ci++) {
+      const col = subCols[ci]!;
       const v = col.path ? getValueAtPath(obj, col.path) : obj[col.name];
       const encoded = encodeValue(v, col.sqlType);
       if (hasCodecs) {
@@ -927,7 +917,7 @@ export function hydrateRow(
   include?: string[]
 ): Record<string, unknown> {
   if (feature("DEBUG_TRACING")) traceBegin("schema.hydrateRow");
-  // Fast path: no codecs, no select, no subTables — use pre-compiled hydrator
+  // Fast path: no codecs, no select, no subTables - use pre-compiled hydrator
   if (!codecs?.size && !select && !meta.subTables.length) {
     if (feature("DEBUG_TRACING")) traceEnd();
     if (meta._hydrateFast) return meta._hydrateFast(flat);

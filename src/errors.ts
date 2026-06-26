@@ -51,22 +51,38 @@ export class ORMError extends Error {
   }
 }
 
-// Simple synchronous trace stack - safe because SQLite ops are single-threaded
-const _traceStack: TraceEntry[] = [];
+// Lazy trace storage: avoid creating TraceEntry objects until an error occurs.
+// Labels, times, and details are stored as separate arrays and only combined
+// when currentTrace() is called (via raise()).
+const _traceLabels: string[] = [];
+const _traceTimes: number[] = [];
+const _traceDetails: (Record<string, unknown> | undefined)[] = [];
 
 /** @internal */
 export function enterTrace(label: string, details?: Record<string, unknown>): void {
-  _traceStack.push({ label, time: Date.now(), details });
+  _traceLabels.push(label);
+  _traceTimes.push(Date.now());
+  _traceDetails.push(details);
 }
 
 /** @internal */
 export function leaveTrace(): void {
-  _traceStack.pop();
+  _traceLabels.pop();
+  _traceTimes.pop();
+  _traceDetails.pop();
 }
 
 /** @internal */
 export function currentTrace(): TraceEntry[] {
-  return _traceStack.slice();
+  const entries: TraceEntry[] = [];
+  for (let i = 0; i < _traceLabels.length; i++) {
+    entries.push({
+      label: _traceLabels[i]!,
+      time: _traceTimes[i]!,
+      details: _traceDetails[i],
+    });
+  }
+  return entries;
 }
 
 /**

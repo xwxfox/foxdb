@@ -118,6 +118,6 @@ test("nested objects and object arrays still produce expected columns", () => {
   expect(lineItemsSub?.columns.map(c => c.name)).toContain("name");
   expect(lineItemsSub?.columns.map(c => c.name)).toContain("qty");
 
-  // tags is a scalar array — stays as TEXT column, not a sub-table
+  // tags is a scalar array - stays as TEXT column, not a sub-table
   expect(meta.subTables.find(s => s.fieldName === "tags")).toBeUndefined();
 });

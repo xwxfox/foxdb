@@ -55,9 +55,9 @@ export interface CreateORMBaseOptions {
   asyncReaderPool?: number;
   /**
    * How sub-table foreign key deletions are handled.
-   * - `"native"` (default): SQLite ON DELETE CASCADE — FK verification on INSERT.
-   * - `"foxdb"`: No FK in DDL, foxdb handles cascading in application code — faster INSERTs.
-   * - `"none"`: No FK, no cascade — sub-table rows become orphaned on parent delete.
+   * - `"native"` (default): SQLite ON DELETE CASCADE - FK verification on INSERT.
+   * - `"foxdb"`: No FK in DDL, foxdb handles cascading in application code - faster INSERTs.
+   * - `"none"`: No FK, no cascade - sub-table rows become orphaned on parent delete.
    */
   onDeleteBehavior?: "native" | "foxdb" | "none";
 }
