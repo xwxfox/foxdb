@@ -102,7 +102,7 @@ function buildNodeSql(
     }
     case "nested": {
       const sub = meta?.subTables.find(st => st.fieldName === node.field);
-      if (!sub || sub.isScalar || !meta?.primaryKey) {
+      if (!sub || !meta?.primaryKey) {
         throw new Error(
           `nested() filter on "${node.field}": field is not an object-array sub-table`
         );

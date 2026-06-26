@@ -63,18 +63,15 @@ describe("nested object flattening", () => {
     expect(colMap.get("pricing__discount__meta")!.nullable).toBe(true);
     expect(colMap.get("pricing__discount__meta")!.path).toEqual(["pricing", "discount", "meta"]);
 
-    // Array of primitives becomes a scalar sub-table
-    expect(colMap.get("tags")).toBeUndefined();
+    // Array of primitives stays as JSON TEXT column
+    expect(colMap.get("tags")).toBeDefined();
+    expect(colMap.get("tags")!.sqlType).toBe("TEXT");
 
-    // Sub-tables for items (object array) and tags (scalar array)
-    expect(meta.subTables).toHaveLength(2);
+    // Only object-array (items) becomes a sub-table
+    expect(meta.subTables).toHaveLength(1);
     const itemsSub = meta.subTables.find(s => s.fieldName === "items")!;
     expect(itemsSub.tableName).toBe("test__items");
-    const tagsSub = meta.subTables.find(s => s.fieldName === "tags")!;
-    expect(tagsSub.isScalar).toBe(true);
-    expect(tagsSub.scalarType).toBe("TEXT");
-    expect(tagsSub.columns).toHaveLength(1);
-    expect(tagsSub.columns[0]!.name).toBe("_value");
+    expect(meta.subTables.find(s => s.fieldName === "tags")).toBeUndefined();
   });
 
   test("insert roundtrip preserves nested objects", () => {

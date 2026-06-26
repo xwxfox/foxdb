@@ -497,7 +497,7 @@ export class Repository<
         name: idx.name,
         where: idx.where,
       })),
-      subTables: this.meta.subTables.map((s) => ({ fieldName: s.fieldName, tableName: s.tableName, isScalar: s.isScalar })),
+      subTables: this.meta.subTables.map((s) => ({ fieldName: s.fieldName, tableName: s.tableName })),
     });
     const stmts = buildCreateTableSQL(this.meta, pk, this.descriptor.autoIndex ?? true);
     sqlDebug(`ddl.migrate DDL statements count`, { count: stmts.length + configIndexes.length });
@@ -2981,9 +2981,7 @@ export class Repository<
       if (prefetched && prefetched.has(sub.tableName)) {
         const rows = prefetched.get(sub.tableName)!;
         traceBegin("repo.hydrateOne.cleanPrefetched");
-        const cleaned = sub.isScalar
-          ? rows.map((r) => ({ _value: r._value }))
-          : rows.map((r) => hydrateRow(r, subMeta, EMPTY_MAP, this._codecs));
+        const cleaned = rows.map((r) => hydrateRow(r, subMeta, EMPTY_MAP, this._codecs));
         traceEnd({ sub: sub.fieldName, rows: rows.length });
         subRows.set(sub.tableName, cleaned);
         continue;
@@ -2997,9 +2995,7 @@ export class Repository<
       );
       traceEnd({ sub: sub.fieldName, rows: rows.length });
 
-      const cleaned = sub.isScalar
-        ? rows.map((r) => ({ _value: r._value }))
-        : rows.map((r) => hydrateRow(r, subMeta, EMPTY_MAP, this._codecs));
+      const cleaned = rows.map((r) => hydrateRow(r, subMeta, EMPTY_MAP, this._codecs));
 
       subRows.set(sub.tableName, cleaned);
     }

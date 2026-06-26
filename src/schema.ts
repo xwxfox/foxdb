@@ -333,74 +333,41 @@ export function introspectTable(
   });
 
   for (const [fieldName, raw] of Object.entries(schema.properties)) {
-    if (IsArray(raw)) {
+    if (IsArray(raw) && IsObject(raw.items)) {
       arrayFieldNames.add(fieldName);
-      if (IsObject(raw.items)) {
-        const itemSchema = raw.items;
-        const subTableName = `${tableName}__${fieldName}`;
-        const subCols = buildColumns(itemSchema.properties, [], 0, false);
-        sqlDebug(`introspect.${tableName} field ${fieldName} → sub-table`, {
-          subTableName,
-          columnCount: subCols.length,
-          columns: subCols.map((c) => ({ name: c.name, sqlType: c.sqlType, path: c.path })),
-          reason: "top-level array of objects → separate sub-table with FK back to owner",
-        });
-        const subByName = new Map<string, ColumnMeta>();
-        const subByPath = new Map<string, ColumnMeta>();
-        for (const col of subCols) {
-          subByName.set(col.name, col);
-          if (col.path) subByPath.set(col.path.join("."), col);
-        }
-        const insertCols = ["_owner_id", "_index", ...subCols.map((c) => c.name)];
-        const insertColsSql = insertCols.map((c) => `"${c}"`).join(", ");
-        const insertValueGroup = `(${insertCols.map(() => "?").join(", ")})`;
-        subTables.push({
-          fieldName,
-          tableName: subTableName,
-          itemSchema,
-          columns: subCols,
-          columnByName: subByName,
-          columnByPath: subByPath,
-          insertColsSql,
-          insertValueGroup,
-          insertColumnNames: insertCols,
-        });
-      } else {
-        // Scalar array - stored as a sub-table with a _value column
-        const scalarType = inferScalarSqlType(raw.items);
-        const subTableName = `${tableName}__${fieldName}`;
-        sqlDebug(`introspect.${tableName} field ${fieldName} → scalar sub-table`, {
-          subTableName,
-          scalarType,
-          reason: "top-level array of primitives → scalar sub-table with _value column",
-        });
-        const _valueCol: ColumnMeta = {
-          name: "_value",
-          sqlType: scalarType,
-          nullable: false,
-          optional: false,
-        };
-        const subByName = new Map<string, ColumnMeta>([["_value", _valueCol]]);
-        const subByPath = new Map<string, ColumnMeta>();
-        const insertCols = ["_owner_id", "_index", "_value"];
-        subTables.push({
-          fieldName,
-          tableName: subTableName,
-          columns: [_valueCol],
-          columnByName: subByName,
-          columnByPath: subByPath,
-          isScalar: true,
-          scalarType,
-          insertColsSql: insertCols.map((c) => `"${c}"`).join(", "),
-          insertValueGroup: `(${insertCols.map(() => "?").join(", ")})`,
-          insertColumnNames: insertCols,
-        });
+      const itemSchema = raw.items;
+      const subTableName = `${tableName}__${fieldName}`;
+      const subCols = buildColumns(itemSchema.properties, [], 0, false);
+      sqlDebug(`introspect.${tableName} field ${fieldName} → sub-table`, {
+        subTableName,
+        columnCount: subCols.length,
+        columns: subCols.map((c) => ({ name: c.name, sqlType: c.sqlType, path: c.path })),
+        reason: "top-level array of objects → separate sub-table with FK back to owner",
+      });
+      const subByName = new Map<string, ColumnMeta>();
+      const subByPath = new Map<string, ColumnMeta>();
+      for (const col of subCols) {
+        subByName.set(col.name, col);
+        if (col.path) subByPath.set(col.path.join("."), col);
       }
+      const insertCols = ["_owner_id", "_index", ...subCols.map((c) => c.name)];
+      const insertColsSql = insertCols.map((c) => `"${c}"`).join(", ");
+      const insertValueGroup = `(${insertCols.map(() => "?").join(", ")})`;
+      subTables.push({
+        fieldName,
+        tableName: subTableName,
+        itemSchema,
+        columns: subCols,
+        columnByName: subByName,
+        columnByPath: subByPath,
+        insertColsSql,
+        insertValueGroup,
+        insertColumnNames: insertCols,
+      });
     }
   }
 
-  const columns = buildColumns(schema.properties, [], 0, true)
-    .filter(col => !arrayFieldNames.has(col.name));
+  const columns = buildColumns(schema.properties, [], 0, true);
 
   sqlDebug(`introspect.${tableName} columns built`, {
     totalScalar: columns.length,
@@ -659,78 +626,47 @@ export function buildCreateTableSQL(
     const pkColMeta = meta.columns.find((c) => c.name === primaryKey);
     const pkType = pkColMeta?.sqlType ?? "TEXT";
     const fkRef = `REFERENCES "${meta.tableName}"("${primaryKey}") ON DELETE CASCADE`;
-    if (sub.isScalar) {
-      sqlDebug(`ddl.subTable scalar for ${sub.fieldName}`, {
-        tableName: sub.tableName,
-        scalarType: sub.scalarType,
-        ownerPkType: pkType,
-        reason: `top-level array of primitives → scalar sub-table with FK CASCADE`,
-      });
-      const subSql = `CREATE TABLE IF NOT EXISTS "${sub.tableName}" (\n` +
-        `  "_id" INTEGER PRIMARY KEY AUTOINCREMENT,\n` +
-        `  "_owner_id" ${pkType} NOT NULL ${fkRef},\n` +
-        `  "_index" INTEGER NOT NULL,\n` +
-        `  "_value" ${sub.scalarType} NOT NULL\n)`;
-      stmts.push(subSql);
-      sqlDebug(`ddl.subTable SQL for ${sub.tableName}`, { sql: subSql });
+    const subCols = [
+      `  "_id" INTEGER PRIMARY KEY AUTOINCREMENT`,
+      `  "_owner_id" ${pkType} NOT NULL ${fkRef}`,
+      `  "_index" INTEGER NOT NULL`,
+      ...sub.columns.map((c) => {
+        const notNull = !c.nullable ? " NOT NULL" : "";
+        return `  "${c.name}" ${c.sqlType}${notNull}`;
+      }),
+    ];
+    const subSql = `CREATE TABLE IF NOT EXISTS "${sub.tableName}" (\n${subCols.join(",\n")}\n)`;
+    stmts.push(subSql);
+    sqlDebug(`ddl.subTable SQL for ${sub.tableName}`, { sql: subSql });
 
-      const idxOwner = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__owner" ON "${sub.tableName}" ("_owner_id")`;
-      stmts.push(idxOwner);
-      sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxOwner, reason: "FK index for hydration + CASCADE lookups" });
+    const idxOwner = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__owner" ON "${sub.tableName}" ("_owner_id")`;
+    stmts.push(idxOwner);
+    sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxOwner, reason: "FK index for hydration + CASCADE lookups" });
 
-      const idxValue = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__value" ON "${sub.tableName}" ("_value")`;
-      stmts.push(idxValue);
-      sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxValue, reason: "value lookups for arraySome/arrayNot/contains filters" });
-    } else {
-      sqlDebug(`ddl.subTable object-array for ${sub.fieldName}`, {
-        tableName: sub.tableName,
-        columnCount: sub.columns.length,
-        columns: sub.columns.map((c) => c.name),
-        reason: `top-level array of objects → object sub-table with FK CASCADE`,
-      });
-      const ownerType = pkType;
-      const subCols = [
-        `  "_id" INTEGER PRIMARY KEY AUTOINCREMENT`,
-        `  "_owner_id" ${ownerType} NOT NULL ${fkRef}`,
-        `  "_index" INTEGER NOT NULL`,
-        ...sub.columns.map((c) => {
-          const notNull = !c.nullable ? " NOT NULL" : "";
-          return `  "${c.name}" ${c.sqlType}${notNull}`;
-        }),
-      ];
-      const subSql = `CREATE TABLE IF NOT EXISTS "${sub.tableName}" (\n${subCols.join(",\n")}\n)`;
-      stmts.push(subSql);
-      sqlDebug(`ddl.subTable SQL for ${sub.tableName}`, { sql: subSql });
-
-      const idxOwner = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__owner" ON "${sub.tableName}" ("_owner_id")`;
-      stmts.push(idxOwner);
-      sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxOwner, reason: "FK index for hydration + CASCADE lookups" });
-
-      if (autoIndex) {
-        const MAX_AUTO = 3;
-        let autoIndexed = 0;
-        const candidates = sub.columns.filter((col) => col.sqlType === "TEXT");
-        const nonNullCandidates = candidates.filter((col) => !col.nullable);
-        const nullCandidates = candidates.filter((col) => col.nullable);
-        const ordered = [...nonNullCandidates, ...nullCandidates];
-        for (const col of ordered) {
-          if (autoIndexed >= MAX_AUTO) break;
-          const upper = col.name.toUpperCase();
-          if (upper.endsWith("DATE") || upper.endsWith("AT") || upper.endsWith("TIME")) continue;
-          const idxCol = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__${col.name}" ON "${sub.tableName}" ("${col.name}")`;
-          stmts.push(idxCol);
-          autoIndexed++;
-          sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxCol, reason: `auto-index TEXT column "${col.name}" for WHERE / ORDER BY` });
-        }
-        sqlDebug(`ddl.autoIndex summary for ${sub.tableName}`, {
-          autoIndexed,
-          totalCandidates: candidates.length,
-          capped: autoIndexed >= MAX_AUTO,
-          note: autoIndexed > 0 ? `TEXT columns auto-indexed (max ${MAX_AUTO}). Set autoIndex: false in table() to disable.` : "no suitable TEXT columns to auto-index",
-        });
-      } else {
-        sqlDebug(`ddl.autoIndex summary for ${sub.tableName}`, { autoIndexed: 0, note: "autoIndex disabled. only _owner_id indexed." });
+    if (autoIndex) {
+      const MAX_AUTO = 3;
+      let autoIndexed = 0;
+      const candidates = sub.columns.filter((col) => col.sqlType === "TEXT");
+      const nonNullCandidates = candidates.filter((col) => !col.nullable);
+      const nullCandidates = candidates.filter((col) => col.nullable);
+      const ordered = [...nonNullCandidates, ...nullCandidates];
+      for (const col of ordered) {
+        if (autoIndexed >= MAX_AUTO) break;
+        const upper = col.name.toUpperCase();
+        if (upper.endsWith("DATE") || upper.endsWith("AT") || upper.endsWith("TIME")) continue;
+        const idxCol = `CREATE INDEX IF NOT EXISTS "idx_${sub.tableName}__${col.name}" ON "${sub.tableName}" ("${col.name}")`;
+        stmts.push(idxCol);
+        autoIndexed++;
+        sqlDebug(`ddl.index for ${sub.tableName}`, { sql: idxCol, reason: `auto-index TEXT column "${col.name}" for WHERE / ORDER BY` });
       }
+      sqlDebug(`ddl.autoIndex summary for ${sub.tableName}`, {
+        autoIndexed,
+        totalCandidates: candidates.length,
+        capped: autoIndexed >= MAX_AUTO,
+        note: autoIndexed > 0 ? `TEXT columns auto-indexed (max ${MAX_AUTO}). Set autoIndex: false in table() to disable.` : "no suitable TEXT columns to auto-index",
+      });
+    } else {
+      sqlDebug(`ddl.autoIndex summary for ${sub.tableName}`, { autoIndexed: 0, note: "autoIndex disabled. only _owner_id indexed." });
     }
   }
 
@@ -862,19 +798,6 @@ export function flattenSubRows(
   codecs?: Map<string, ColumnCodec>
 ): Array<Record<string, unknown>> {
   if (feature("DEBUG_TRACING")) traceBegin("schema.flattenSubRows");
-  if (sub.isScalar) {
-    const result: Array<Record<string, unknown>> = new Array(items.length);
-    for (let idx = 0; idx < items.length; idx++) {
-      const v = items[idx];
-      result[idx] = {
-        _owner_id: ownerPk,
-        _index: idx,
-        _value: encodeValue(v, sub.scalarType),
-      };
-    }
-    if (feature("DEBUG_TRACING")) traceEnd();
-    return result;
-  }
   const result: Array<Record<string, unknown>> = new Array(items.length);
   const hasCodecs = codecs?.size;
   for (let idx = 0; idx < items.length; idx++) {
@@ -1022,11 +945,7 @@ export function hydrateRow(
           } else {
             const rows = subRows.get(sub.tableName);
             if (include || rows) {
-              if (sub.isScalar) {
-                obj[sub.fieldName] = (rows ?? []).map(r => decodeValue(r._value, sub.scalarType));
-              } else {
-                obj[sub.fieldName] = rows ?? [];
-              }
+              obj[sub.fieldName] = rows ?? [];
             }
           }
         }
@@ -1095,11 +1014,7 @@ export function hydrateRow(
     } else {
       const rows = subRows.get(sub.tableName);
       if (include || rows) {
-        if (sub.isScalar) {
-          obj[sub.fieldName] = (rows ?? []).map(r => decodeValue(r._value, sub.scalarType));
-        } else {
-          obj[sub.fieldName] = rows ?? [];
-        }
+        obj[sub.fieldName] = rows ?? [];
       }
     }
   }
