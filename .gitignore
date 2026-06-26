@@ -19,3 +19,5 @@ CPU.*.md
 Heap.*.md
 with_auto_index/Heap.*.md
 with_auto_index/CPU.*.md
+ins-bench-res.md
+ins-bench.ts

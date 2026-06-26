@@ -280,7 +280,7 @@ export function buildColumns(
     const isBool = IsBoolean(schema);
     const decode = isBool ? ColDecode.Bool
       : IsObject(schema) ? ColDecode.Json
-      : ColDecode.Scalar;
+        : ColDecode.Scalar;
     cols.push({
       name: colName,
       sqlType: finalSqlType,
@@ -433,7 +433,7 @@ export function introspectTable(
       if (c.decode === undefined) {
         c.decode = c.isBoolean ? ColDecode.Bool
           : c.sqlType === "TEXT" ? ColDecode.Scalar
-          : ColDecode.Scalar;
+            : ColDecode.Scalar;
       }
       if (c._targetKey === undefined) {
         c._targetKey = c.path ? (c.path.length === 1 ? c.path[0] : undefined) : c.name;
@@ -496,7 +496,7 @@ export function compileHydrateRowFn(
             const codec = codecMap.get(d.src);
             if (codec) v = codec.decode(v as DBValue);
             if (d.decode === ColDecode.Json) {
-              if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+              if (typeof v === "string") { try { v = JSON.parse(v); } catch { } }
             } else if (d.decode === ColDecode.Bool) {
               v = v == null ? null : v === 1;
             }
@@ -507,7 +507,7 @@ export function compileHydrateRowFn(
             const codec = codecMap.get(p.src);
             if (codec) v = codec.decode(v as DBValue);
             if (p.decode === ColDecode.Json) {
-              if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+              if (typeof v === "string") { try { v = JSON.parse(v); } catch { } }
             } else if (p.decode === ColDecode.Bool) {
               v = v == null ? null : v === 1;
             }
@@ -529,7 +529,7 @@ export function compileHydrateRowFn(
         const codec = codecMap.get(d.src);
         if (codec) v = codec.decode(v as DBValue);
         if (d.decode === ColDecode.Json) {
-          if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+          if (typeof v === "string") { try { v = JSON.parse(v); } catch { } }
         } else if (d.decode === ColDecode.Bool) {
           v = v == null ? null : v === 1;
         }
@@ -551,7 +551,7 @@ export function compileHydrateRowFn(
         if (d) {
           let v = flat[d.src];
           if (d.decode === ColDecode.Json) {
-            if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+            if (typeof v === "string") { try { v = JSON.parse(v); } catch { } }
           } else if (d.decode === ColDecode.Bool) {
             v = v == null ? null : v === 1;
           }
@@ -560,7 +560,7 @@ export function compileHydrateRowFn(
           const p = pathList[i]!;
           let v = flat[p.src];
           if (p.decode === ColDecode.Json) {
-            if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+            if (typeof v === "string") { try { v = JSON.parse(v); } catch { } }
           } else if (p.decode === ColDecode.Bool) {
             v = v == null ? null : v === 1;
           }
@@ -582,7 +582,7 @@ export function compileHydrateRowFn(
       const d = directList[i]!;
       let v = flat[d.src];
       if (d.decode === ColDecode.Json) {
-        if (typeof v === "string") { try { v = JSON.parse(v); } catch {} }
+        if (typeof v === "string") { try { v = JSON.parse(v); } catch { } }
       } else if (d.decode === ColDecode.Bool) {
         v = v == null ? null : v === 1;
       }
@@ -599,7 +599,8 @@ export function compileHydrateRowFn(
 export function buildCreateTableSQL(
   meta: TableMeta,
   primaryKey: string,
-  autoIndex = true
+  autoIndex = false,
+  onDeleteBehavior: "native" | "foxdb" | "none" = "native"
 ): string[] {
   const stmts: string[] = [];
 
@@ -625,10 +626,12 @@ export function buildCreateTableSQL(
   for (const sub of meta.subTables) {
     const pkColMeta = meta.columns.find((c) => c.name === primaryKey);
     const pkType = pkColMeta?.sqlType ?? "TEXT";
-    const fkRef = `REFERENCES "${meta.tableName}"("${primaryKey}") ON DELETE CASCADE`;
+    const fkRef = onDeleteBehavior === "native"
+      ? `REFERENCES "${meta.tableName}"("${primaryKey}") ON DELETE CASCADE`
+      : "";
     const subCols = [
       `  "_id" INTEGER PRIMARY KEY AUTOINCREMENT`,
-      `  "_owner_id" ${pkType} NOT NULL ${fkRef}`,
+      `  "_owner_id" ${pkType} NOT NULL ${fkRef}`.trim(),
       `  "_index" INTEGER NOT NULL`,
       ...sub.columns.map((c) => {
         const notNull = !c.nullable ? " NOT NULL" : "";

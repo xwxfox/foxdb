@@ -5,7 +5,7 @@
  * Zero runtime casts; all types are inferred from the TObject schema.
  */
 
-import { Compile } from "typebox/compile";
+import { Compile } from "typebox/schema";
 import type { TObject, TProperties, TSchema } from "typebox";
 import type {
   Infer,
@@ -172,6 +172,7 @@ export class Repository<
   private readonly _insertPlaceholders: string;
   private readonly _readScheduler?: ReadScheduler;
   private readonly _allColumnNames: string[];
+  private readonly _onDeleteBehavior: "native" | "foxdb" | "none";
 
   /** @internal */
   setEventBus(bus: EventBus): void {
@@ -192,10 +193,12 @@ export class Repository<
       GeneratedColumnConfig | undefined
     >,
     db: BunDatabase,
-    readScheduler?: ReadScheduler
+    readScheduler?: ReadScheduler,
+    onDeleteBehavior: "native" | "foxdb" | "none" = "native"
   ) {
     this.tableName = tableName;
     this.descriptor = config;
+    this._onDeleteBehavior = onDeleteBehavior;
     this.db = db;
     this._readScheduler = readScheduler;
     this._executor = new QueryExecutor({ db, tableName: this.tableName });
@@ -499,7 +502,7 @@ export class Repository<
       })),
       subTables: this.meta.subTables.map((s) => ({ fieldName: s.fieldName, tableName: s.tableName })),
     });
-    const stmts = buildCreateTableSQL(this.meta, pk, this.descriptor.autoIndex ?? true);
+    const stmts = buildCreateTableSQL(this.meta, pk, this.descriptor.autoIndex ?? false, this._onDeleteBehavior);
     sqlDebug(`ddl.migrate DDL statements count`, { count: stmts.length + configIndexes.length });
     this.db.transaction(() => {
       for (const sql of stmts) {
@@ -2859,7 +2862,17 @@ export class Repository<
         return true;
       }
 
-      // FK CASCADE handles sub-table deletion automatically
+      // FoxDB handles sub-table cascade
+      if (this._onDeleteBehavior === "foxdb") {
+        for (const sub of this.meta.subTables) {
+          this._executor.exec(
+            `DELETE FROM "${sub.tableName}" WHERE "_owner_id" = ?`,
+            [id as string | number],
+            "delete"
+          );
+        }
+      }
+
       const result = this.db.transaction(() => {
         const result = this._executor.exec(
           `DELETE FROM "${this.tableName}" WHERE "${pk}" = ?`,
@@ -2898,7 +2911,28 @@ export class Repository<
 
       const { sql: whereSql, params } = buildWhere(where, undefined, this.meta);
 
-      // FK CASCADE handles sub-table deletion automatically
+      // FoxDB handles sub-table cascade — find affected PKs first
+      if (this._onDeleteBehavior === "foxdb" && this.meta.subTables.length > 0) {
+        const pkSql = `SELECT "${pk}" FROM "${this.tableName}" ${whereSql}`.trim();
+        const pkRows = this._executor.all<Record<string, unknown>>(pkSql, params, "read");
+        if (pkRows.length > 0) {
+          const pkValues: (string | number)[] = [];
+          for (const r of pkRows) {
+            const v = r[pk];
+            if (typeof v === "string" || typeof v === "number") pkValues.push(v);
+          }
+          if (pkValues.length > 0) {
+            for (const sub of this.meta.subTables) {
+              this._executor.exec(
+                `DELETE FROM "${sub.tableName}" WHERE "_owner_id" IN (${pkValues.map(() => "?").join(", ")})`,
+                pkValues,
+                "delete"
+              );
+            }
+          }
+        }
+      }
+
       const changes = this.db.transaction(() => {
         const delSql = `DELETE FROM "${this.tableName}" ${whereSql}`.trim();
         const result = this._executor.exec(delSql, params, "delete");
