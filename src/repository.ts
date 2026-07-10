@@ -38,6 +38,7 @@ import type {
   SelectableKeys,
   SelectShape,
   GeneratedColumnConfig,
+  FTSConfig,
 } from "./types.ts";
 import type { BunDatabase, SQLQueryBindings } from "./database.ts";
 import { QueryExecutor } from "./query-executor.ts";
@@ -61,6 +62,10 @@ import {
 } from "./schema.ts";
 import { GzipCodec } from "./codec.ts";
 import type { ColumnCodec } from "./codec.ts";
+import {
+  ftsTableName, resolveFtsColumns, buildCreateFtsSQL,
+  buildFtsIndexInsert, buildFtsDeleteCommand, buildFtsDeleteAllSQL, buildFtsRebuildSQL,
+} from "./fts.ts";
 import {
   buildSelect,
   buildSelectSql,
@@ -177,6 +182,10 @@ export class Repository<
   private readonly _readScheduler?: ReadScheduler;
   private readonly _allColumnNames: string[];
   private readonly _onDeleteBehavior: "native" | "foxdb" | "none";
+  private readonly _ftsEnabled: boolean;
+  private readonly _ftsTableName: string;
+  private readonly _ftsColumns: string[];
+  private readonly _ftsColumnSet: Set<string>;
 
   /** @internal */
   setEventBus(bus: EventBus): void {
@@ -262,6 +271,18 @@ export class Repository<
     // Prebuild INSERT SQL template (columns never change per table)
     this._insertColsSql = this.meta.insertColumnNames.map((k) => `"${k}"`).join(", ");
     this._insertPlaceholders = this.meta.insertColumnNames.map(() => "?").join(", ");
+
+    if (config.fts) {
+      this._ftsEnabled = true;
+      this._ftsTableName = ftsTableName(tableName);
+      this._ftsColumns = resolveFtsColumns(this.meta, config.fts as FTSConfig);
+      this._ftsColumnSet = new Set(this._ftsColumns);
+    } else {
+      this._ftsEnabled = false;
+      this._ftsTableName = "";
+      this._ftsColumns = [];
+      this._ftsColumnSet = new Set();
+    }
 
     this._migrate();
 
@@ -535,6 +556,22 @@ export class Repository<
         });
         this.db.exec(idxSql);
       }
+
+      if (this._ftsEnabled) {
+        const fts = this.descriptor.fts as FTSConfig;
+        const opts = typeof fts === "object" ? fts : {};
+        const createSql = buildCreateFtsSQL(this.tableName, this._ftsColumns, {
+          tokenizer: (opts as { tokenizer?: string }).tokenizer,
+          prefix: (opts as { prefix?: number[] }).prefix,
+        });
+        sqlFileWrite(createSql);
+        this.db.exec(createSql);
+        const baseCount = (this.db.prepare(`SELECT count(*) AS c FROM "${this.tableName}"`).get() as { c: number }).c;
+        if (baseCount > 0) {
+          const idxCount = (this.db.prepare(`SELECT count(*) AS c FROM "${this._ftsTableName}"`).get() as { c: number }).c;
+          if (idxCount === 0) this.db.exec(buildFtsRebuildSQL(this.tableName));
+        }
+      }
     });
   }
 
@@ -632,10 +669,14 @@ export class Repository<
         if (this._timestampNames.createdAt) obj[this._timestampNames.createdAt] = now;
         if (this._timestampNames.updatedAt) obj[this._timestampNames.updatedAt] = now;
       }
-      if (this.db._txDepth > 0) {
+      const doInsert = () => {
         this._insertRow(obj);
+        if (this._ftsEnabled) this._ftsIndexByPk([this._assertPk(obj[this.descriptor.primaryKey.name]) as string | number]);
+      };
+      if (this.db._txDepth > 0) {
+        doInsert();
       } else {
-        this.db.transaction(() => this._insertRow(obj));
+        this.db.transaction(doInsert);
       }
 
       if (this._hasEviction) {
@@ -743,6 +784,11 @@ export class Repository<
           }
         }
         traceEnd();
+
+        if (this._ftsEnabled) {
+          const pk = this.descriptor.primaryKey.name;
+          this._ftsIndexByPk(objs.map((o) => this._assertPk(o[pk]) as string | number));
+        }
       });
 
       if (this._hasEviction) {
@@ -831,6 +877,7 @@ export class Repository<
       }
 
       this.db.transaction(() => {
+        if (this._ftsEnabled) this._ftsDeleteByPk([this._assertPk(obj[this.descriptor.primaryKey.name]) as string | number]);
         const { sql, params } = buildUpsert(
           this.tableName,
           flat,
@@ -859,6 +906,8 @@ export class Repository<
             }
           }
         }
+
+        if (this._ftsEnabled) this._ftsIndexByPk([this._assertPk(obj[this.descriptor.primaryKey.name]) as string | number]);
       });
 
       if (this._hasEviction) {
@@ -918,7 +967,9 @@ export class Repository<
       }
 
       let totalChanges = 0;
+      const pks = objs.map((o) => this._assertPk(o[this.descriptor.primaryKey.name]) as string | number);
       this.db.transaction(() => {
+        if (this._ftsEnabled) this._ftsDeleteByPk(pks);
         const batches = buildUpsertMany(this.tableName, flatRows, conflictCols, updateCols);
         for (const { sql, params } of batches) {
           const result = this._executor.exec(sql, params, "upsertMany");
@@ -947,6 +998,8 @@ export class Repository<
             }
           }
         }
+
+        if (this._ftsEnabled) this._ftsIndexByPk(pks);
       });
 
       if (this._hasEviction) {
@@ -2762,6 +2815,9 @@ export class Repository<
       traceBegin("repo.update.mergeAndFlatten");
       // Validate by merging with existing to produce a complete schema-valid object
       const existingObj = this._hydrateOne(flatRow);
+      for (const k of Object.keys(existingObj)) {
+        if (existingObj[k] === null) delete existingObj[k];
+      }
       const merged = this.parse({ ...existingObj, ...data });
       const mergedObj = this._record(merged);
       if (this._hasTimestamps && this._timestampNames.updatedAt) {
@@ -2775,6 +2831,10 @@ export class Repository<
       traceEnd();
 
       const doUpdate = () => {
+        const pkNum = this._assertPk(rawPk) as string | number;
+        const touches = this._patchTouchesFts(patch);
+        if (touches) this._ftsDeleteByPk([pkNum]);
+
         traceBegin("repo.update.execMain");
         const { sql, params } = buildUpdate(this.tableName, pk, this._assertPk(rawPk), patch);
         this._executor.exec(sql, params, "update");
@@ -2802,6 +2862,8 @@ export class Repository<
           }
         }
         traceEnd();
+
+        if (touches) this._ftsIndexByPk([pkNum]);
       };
 
       if (this.db._txDepth > 0) {
@@ -2839,6 +2901,28 @@ export class Repository<
       }
 
       const softDeleteCol = opts.includeDeleted ? undefined : this.descriptor.softDelete?.column;
+
+      if (this._ftsEnabled && this._patchTouchesFts(patch)) {
+        const { sql: wsql, params: wparams } = buildWhere(opts.where, softDeleteCol, this.meta);
+        const rowids = this._executor.all<{ rowid: number }>(
+          `SELECT rowid FROM "${this.tableName}" ${wsql}`.trim(), wparams, "read"
+        ).map((r) => r.rowid);
+        return this.db.transaction(() => {
+          if (rowids.length > 0) this._ftsDeleteByRowid(rowids);
+          const { sql, params } = buildUpdateWhere(
+            this.tableName,
+            patch,
+            opts.where,
+            softDeleteCol,
+            this.meta
+          );
+          const result = this._executor.exec(sql, params, "updateWhere");
+          if (rowids.length > 0) this._ftsIndexByRowid(rowids);
+          this._emit("updateWhere", { where: opts.where, result: result.changes });
+          return result.changes;
+        });
+      }
+
       const { sql, params } = buildUpdateWhere(
         this.tableName,
         patch,
@@ -2891,6 +2975,7 @@ export class Repository<
       }
 
       const result = this.db.transaction(() => {
+        if (this._ftsEnabled) this._ftsDeleteByPk([id as string | number]);
         const result = this._executor.exec(
           `DELETE FROM "${this.tableName}" WHERE "${pk}" = ?`,
           [id as string | number],
@@ -2951,6 +3036,13 @@ export class Repository<
       }
 
       const changes = this.db.transaction(() => {
+        if (this._ftsEnabled) {
+          const pkRows = this._executor.all<Record<string, unknown>>(
+            `SELECT "${pk}" FROM "${this.tableName}" ${whereSql}`.trim(), params, "read"
+          );
+          const ftsPks = pkRows.map((r) => r[pk]).filter((v): v is string | number => typeof v === "string" || typeof v === "number");
+          this._ftsDeleteByPk(ftsPks);
+        }
         const delSql = `DELETE FROM "${this.tableName}" ${whereSql}`.trim();
         const result = this._executor.exec(delSql, params, "delete");
         return result.changes;
@@ -2979,6 +3071,7 @@ export class Repository<
       for (const sub of this.meta.subTables) {
         this.db.exec(`DELETE FROM "${sub.tableName}"`);
       }
+      if (this._ftsEnabled) this.db.exec(buildFtsDeleteAllSQL(this.tableName));
       this._emit("flush", {});
     });
   }
@@ -2997,7 +3090,50 @@ export class Repository<
     for (const sub of this.meta.subTables) {
       this.db.exec(`DROP TABLE IF EXISTS "${sub.tableName}"`);
     }
+    if (this._ftsEnabled) this.db.exec(`DROP TABLE IF EXISTS "${this._ftsTableName}"`);
     this.db.exec(`DROP TABLE IF EXISTS "${this.tableName}"`);
+  }
+
+  // --- FTS sync helpers -------------------------------------------------------
+
+  private _ftsIndexByPk(pks: (string | number)[]): void {
+    if (!this._ftsEnabled || pks.length === 0) return;
+    const pk = this.descriptor.primaryKey.name;
+    for (let i = 0; i < pks.length; i += 500) {
+      const chunk = pks.slice(i, i + 500);
+      const { sql } = buildFtsIndexInsert(this.tableName, pk, this._ftsColumns, chunk.length, "pk");
+      this._executor.exec(sql, chunk as SQLQueryBindings[], "insert");
+    }
+  }
+  private _ftsDeleteByPk(pks: (string | number)[]): void {
+    if (!this._ftsEnabled || pks.length === 0) return;
+    const pk = this.descriptor.primaryKey.name;
+    for (let i = 0; i < pks.length; i += 500) {
+      const chunk = pks.slice(i, i + 500);
+      const { sql } = buildFtsDeleteCommand(this.tableName, pk, this._ftsColumns, chunk.length, "pk");
+      this._executor.exec(sql, chunk as SQLQueryBindings[], "delete");
+    }
+  }
+  private _ftsIndexByRowid(rowids: number[]): void {
+    if (!this._ftsEnabled || rowids.length === 0) return;
+    for (let i = 0; i < rowids.length; i += 500) {
+      const chunk = rowids.slice(i, i + 500);
+      const { sql } = buildFtsIndexInsert(this.tableName, "rowid", this._ftsColumns, chunk.length, "rowid");
+      this._executor.exec(sql, chunk as SQLQueryBindings[], "insert");
+    }
+  }
+  private _ftsDeleteByRowid(rowids: number[]): void {
+    if (!this._ftsEnabled || rowids.length === 0) return;
+    for (let i = 0; i < rowids.length; i += 500) {
+      const chunk = rowids.slice(i, i + 500);
+      const { sql } = buildFtsDeleteCommand(this.tableName, "rowid", this._ftsColumns, chunk.length, "rowid");
+      this._executor.exec(sql, chunk as SQLQueryBindings[], "delete");
+    }
+  }
+  private _patchTouchesFts(patch: Record<string, unknown>): boolean {
+    if (!this._ftsEnabled) return false;
+    for (const k of Object.keys(patch)) if (this._ftsColumnSet.has(k)) return true;
+    return false;
   }
 
   // --- Sub-table hydration ---------------------------------------------------
