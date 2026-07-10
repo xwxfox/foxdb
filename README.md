@@ -361,6 +361,40 @@ all queries automatically exclude soft-deleted rows. pass `includeDeleted: true`
 orm.users.O_findMany({ where: { status: { eq: "active" } }, includeDeleted: true })
 ```
 
+### full-text search
+
+enable FTS5 on any table by adding `fts: true` (indexes all TEXT columns) or `fts: { columns: [...] }` (explicit column list). Cues `.search()` appears **only** on tables with FTS enabled — zero overhead on other tables:
+
+```typescript
+table(PostSchema, (s) => ({
+  primaryKey: s.id,
+  fts: { columns: [s.title, s.body] },  // or fts: true for all TEXT columns
+}))
+```
+
+the `.search()` chain API returns full entities augmented with `_score` (bm25 rank), plus optional `_snippet` and `_highlight`:
+
+```typescript
+// basic search — returns [{ ...entity, _score, _snippet, _highlight }]
+const matches = orm.posts.search("quick fox").limit(10).exec();
+
+// with column weights (bm25), snippets, highlights, and extra filters
+const rich = orm.posts
+  .search("database")
+  .weights({ title: 2, body: 0.5 })
+  .snippet("body", { tokens: 20 })
+  .highlight("title")
+  .where((q) => q.equals("published", true))
+  .limit(10)
+  .exec();
+
+for (const m of rich) {
+  console.log(`#${m.id} ${m._highlight.title} — ${m._snippet.body} (score: ${m._score})`);
+}
+```
+
+the FTS5 index is an **external-content** table (no data duplication). foxdb keeps it in sync across `insert`, `insertMany`, `update`, `updateWhere`, `upsert`, `upsertMany`, `deleteById`, `deleteWhere`, `flush`, and `drop` — all within the same transaction. soft-deleted rows are excluded from search unless `.includeDeleted()` is called. the virtual table prefix (`_foxdb_fts_`) ensures it never triggers schema drift on reopen.
+
 ## error handling
 
 foxdb uses `ORMError` with trace context. every throw includes the operation name, table, sql, and parameters that led to the error:

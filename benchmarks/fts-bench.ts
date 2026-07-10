@@ -308,4 +308,93 @@ console.log("\n--- SEARCH micro-bench (FTS only) ---");
   orm._close();
 }
 
+// ---------------------------------------------------------------------------
+// FIXED-N head-to-head: the fair overhead measurement. In-memory + median of
+// several runs to remove disk/WAL noise, so no-fts and fts are compared at the
+// exact same N with only the measured operation timed.
+// ---------------------------------------------------------------------------
+
+function makeMemORM(fts: boolean) {
+  return createORM({
+    path: ":memory:",
+    tables: {
+      sales: table(SaleSchema, (s) => ({
+        primaryKey: s.OrderNumber,
+        autoIndex: false,
+        ...(fts ? { fts: { columns: [s.SearchName] } } : {}),
+      })),
+    },
+  });
+}
+
+function median(xs: number[]): number { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]!; }
+
+function measure(
+  fts: boolean,
+  N: number,
+  setup: (orm: ReturnType<typeof makeMemORM>) => void,
+  measured: (orm: ReturnType<typeof makeMemORM>) => void,
+  runs = 5
+): number {
+  const times: number[] = [];
+  for (let r = 0; r < runs; r++) {
+    const orm = makeMemORM(fts);
+    setup(orm);
+    Bun.gc(true);
+    const t0 = performance.now();
+    measured(orm);
+    times.push(performance.now() - t0);
+    orm._close();
+  }
+  return median(times);
+}
+
+function fixedCompare(
+  name: string,
+  N: number,
+  setup: (orm: ReturnType<typeof makeMemORM>) => void,
+  measured: (orm: ReturnType<typeof makeMemORM>) => void
+): void {
+  const noFts = measure(false, N, setup, measured);
+  const fts = measure(true, N, setup, measured);
+  const overhead = ((fts - noFts) / noFts) * 100;
+  console.log(
+    `${name.padEnd(16)} N=${N}  no-fts=${noFts.toFixed(0)}ms (${Math.round(N / (noFts / 1000))}/s)  ` +
+    `fts=${fts.toFixed(0)}ms (${Math.round(N / (fts / 1000))}/s)  ` +
+    `overhead=${overhead >= 0 ? "+" : ""}${overhead.toFixed(0)}%  ` +
+    `fts-cost=${((fts - noFts) / N).toFixed(4)}ms/op`
+  );
+}
+
+console.log("\n=== FIXED-N FTS OVERHEAD (in-memory, median of 5, fts indexes SearchName) ===");
+// warmup JIT
+measure(false, 500, () => {}, (o) => { for (let i = 0; i < 500; i++) o.sales.insert(makeSale(i)); }, 1);
+measure(true, 500, () => {}, (o) => { for (let i = 0; i < 500; i++) o.sales.insert(makeSale(i)); }, 1);
+
+const FN = 2000;
+fixedCompare("INSERT", FN,
+  () => {},
+  (o) => { for (let i = 0; i < FN; i++) o.sales.insert(makeSale(i)); });
+
+fixedCompare("INSERTMANY", FN,
+  () => {},
+  (o) => { o.sales.insertMany(Array.from({ length: FN }, (_, i) => makeSale(i))); });
+
+fixedCompare("UPDATE(indexed)", FN,
+  (o) => { for (let i = 0; i < FN; i++) o.sales.insert(makeSale(i)); },
+  (o) => { for (let i = 0; i < FN; i++) o.sales.update({ OrderNumber: i, SearchName: `Updated ${i}` }); });
+
+fixedCompare("UPDATE(non-idx)", FN,
+  (o) => { for (let i = 0; i < FN; i++) o.sales.insert(makeSale(i)); },
+  (o) => { for (let i = 0; i < FN; i++) o.sales.update({ OrderNumber: i, Account: i }); });
+
+fixedCompare("UPSERTMANY(new)", FN,
+  () => {},
+  (o) => { o.sales.upsertMany({ data: Array.from({ length: FN }, (_, i) => makeSale(i)), conflictTarget: "OrderNumber" }); });
+
+fixedCompare("UPSERTMANY(upd)", FN,
+  (o) => { o.sales.upsertMany({ data: Array.from({ length: FN }, (_, i) => makeSale(i)), conflictTarget: "OrderNumber" }); },
+  (o) => { o.sales.upsertMany({ data: Array.from({ length: FN }, (_, i) => makeSale(i)), conflictTarget: "OrderNumber" }); });
+
 console.log("\n--- DONE ---");
+
