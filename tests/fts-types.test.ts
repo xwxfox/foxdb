@@ -6,6 +6,7 @@ import { describe, test, expect } from "bun:test";
 import { Object, String, Number, Integer } from "typebox";
 import type { FTSFields, FTSEnabled } from "../src/types.ts";
 import { table } from "../src/table.ts";
+import { createORM } from "../src/orm.ts";
 
 const S = Object({
   id: String(),
@@ -41,3 +42,27 @@ describe("fts types", () => {
     expect(true).toBe(true);
   });
 });
+
+function _ftsGating() {
+  const withFts = createORM({ tables: { docs: table(S, (s) => ({ primaryKey: s.id, fts: { columns: [s.title] } })) } });
+  withFts.docs.search("x").highlight("title").exec();
+  // @ts-expect-error "views" is not an indexed fts field
+  withFts.docs.search("x").highlight("views");
+  // @ts-expect-error "body" is not in the configured columns ([title] only)
+  withFts.docs.search("x").snippet("body");
+  withFts._close();
+
+  const withAll = createORM({ tables: { docs: table(S, (s) => ({ primaryKey: s.id, fts: true as const })) } });
+  withAll.docs.search("x").highlight("meta__note").exec();
+  // @ts-expect-error views is Integer, not text
+  withAll.docs.search("x").highlight("views");
+  withAll._close();
+
+  const noFts = createORM({ tables: { docs: table(S, (s) => ({ primaryKey: s.id })) } });
+  // @ts-expect-error search must NOT exist on non-fts tables
+  noFts.docs.search;
+  // @ts-expect-error searchAsync must NOT exist on non-fts tables
+  noFts.docs.searchAsync;
+  noFts._close();
+}
+void _ftsGating;

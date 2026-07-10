@@ -189,6 +189,15 @@ export type { DesiredTable } from "./diff.ts";
 /** @category Advanced */
 export { applySync } from "./sync.ts";
 
+// --- Full-text search ---------------------------------------------------------
+
+/** @category Query Building */
+export { FtsSearchBuilder, ftsTableName, resolveFtsColumns, buildFtsSearchSql } from "./fts.ts";
+/** @category Query Building */
+export type { FtsResult, FtsSearchState, FtsSnippetSpec, FtsHighlightSpec } from "./fts.ts";
+/** @category Schema */
+export type { FTSConfig, FTSFields, FTSEnabled } from "./types.ts";
+
 // --- Internal helpers (not for public use) ------------------------------------
 
 /** @category Advanced */
