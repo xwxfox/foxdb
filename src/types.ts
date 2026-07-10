@@ -10,6 +10,8 @@ import type {
   TSchema,
   TProperties,
   TOptional,
+  TString,
+  TLiteral,
   Static,
 } from "typebox";
 import type { ColumnRef, TScalarSchema } from "./columns.ts";
@@ -650,6 +652,50 @@ export interface SoftDeleteConfig {
   column: string;
 }
 
+// --- Full-text search (FTS5) config ------------------------------------------
+
+/**
+ * Full-text search configuration for a table.
+ * - `true` indexes every TEXT column.
+ * - `{ columns }` indexes an explicit, type-checked column list.
+ * @category Schema
+ */
+export type FTSConfig =
+  | true
+  | {
+      /** Columns to index. Omit to index all TEXT columns. */
+      columns?: ColumnRef<string, TScalarSchema>[];
+      /** FTS5 tokenizer directive, e.g. "porter unicode61", "trigram". Default: "unicode61". */
+      tokenizer?: string;
+      /** FTS5 prefix-index sizes, e.g. [2, 3]. */
+      prefix?: number[];
+    };
+
+/** True when a table has FTS enabled. @internal */
+export type FTSEnabled<F> = [F] extends [undefined] ? false : [F] extends [never] ? false : true;
+
+/** Union of flattened TEXT column names (top-level + nested `a__b`). @internal */
+export type FTSAllTextFields<T extends TSchema & { properties: Record<string, TSchema> }> = {
+  [K in keyof import("./columns.ts").ColumnRefs<T>]: import("./columns.ts").ColumnRefs<T>[K] extends ColumnRef<infer N, infer S>
+    ? S extends TString ? N
+    : S extends TLiteral<string> ? N
+    : never
+    : never;
+}[keyof import("./columns.ts").ColumnRefs<T>];
+
+/** Names extracted from an explicit `{ columns }` FTS config. @internal */
+export type FTSConfiguredFields<F> =
+  F extends { columns: readonly (infer C)[] }
+    ? C extends ColumnRef<infer N, TScalarSchema> ? N : never
+    : never;
+
+/** The searchable field-name union for a table given its FTS config. @internal */
+export type FTSFields<T extends TSchema & { properties: Record<string, TSchema> }, F> =
+  [F] extends [true] ? FTSAllTextFields<T>
+  : F extends { columns: readonly ColumnRef<string, TScalarSchema>[] } ? FTSConfiguredFields<F>
+  : F extends object ? FTSAllTextFields<T>
+  : never;
+
 // --- Generated Columns (object-based config) ------------------------------------
 
 export type GeneratedColumnConfig = {
@@ -692,14 +738,16 @@ export type AnyTableConfig = TableConfig<
   TSchema & { properties: Record<string, TSchema> },
   string,
   TimestampConfig,
-  GeneratedColumnConfig | undefined
+  GeneratedColumnConfig | undefined,
+  FTSConfig | undefined
 >;
 
 export interface TableConfig<
   T extends TSchema & { properties: Record<string, TSchema> } = TSchema & { properties: Record<string, TSchema> },
   PK extends string = string,
   TS extends TimestampConfig = undefined,
-  G extends GeneratedColumnConfig | undefined = undefined
+  G extends GeneratedColumnConfig | undefined = undefined,
+  F extends FTSConfig | undefined = undefined
 > {
   schema: T;
   primaryKey: ColumnRef<PK>;
@@ -710,6 +758,7 @@ export interface TableConfig<
   compression?: CompressionConfig;
   softDelete?: SoftDeleteConfig;
   generated?: G;
+  fts?: F;
   /** Auto-index TEXT columns on sub-tables. Defaults to true. Set false to disable. */
   autoIndex?: boolean;
 }
@@ -748,7 +797,7 @@ export interface BuiltRelation {
  * @category Relations
  */
 export interface RelationEntry<
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Owner extends keyof Tables,
   Target extends keyof Tables
 > {
@@ -762,7 +811,7 @@ export interface RelationEntry<
  * @category Relations
  */
 export type RelationsConfig<
-  Tables extends Record<string, TableConfig<any, any, any, any>>
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>
 > = {
     [K in keyof Tables & string]?: Array<
       {
@@ -798,7 +847,7 @@ export type ScalarMergeNames<
  * @category Relations
  */
 export type ScalarMergeType<
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[],
   Owner extends string,
   Name extends string
@@ -816,7 +865,7 @@ export type ScalarMergeType<
  * @category Relations
  */
 export type ScalarMerge<
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[],
   Owner extends string
 > = {
@@ -850,7 +899,7 @@ export type SubMergeNames<
  * @category Relations
  */
 export type SubMergeType<
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[],
   Owner extends string,
   Sub extends string,
@@ -869,7 +918,7 @@ export type SubMergeType<
  * @category Relations
  */
 export type SubMerge<
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[],
   Owner extends string,
   Sub extends string
@@ -901,7 +950,7 @@ export type SubMerge<
  */
 export type Materialized<
   T extends TSchema & { properties: Record<string, TSchema> },
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[],
   Owner extends string
 > = {

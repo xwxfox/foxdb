@@ -16,7 +16,7 @@ import type { TableDescriptor } from "./table.ts";
  * @category Lifecycle
  */
 export interface ORMContext<
-  T extends Record<string, TableDescriptor<any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any>>,
+  T extends Record<string, TableDescriptor<any, any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[] = readonly TypedRelation[]
 > {
   orm: foxdb<T, Rels>;
@@ -32,7 +32,7 @@ export interface ORMContext<
  * @category Lifecycle
  */
 export type LifecycleHook<
-  T extends Record<string, TableDescriptor<any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any>>,
+  T extends Record<string, TableDescriptor<any, any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[] = readonly TypedRelation[]
 > = (ctx: ORMContext<T, Rels>) => void | Promise<void>;
 
@@ -48,7 +48,7 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 
 /** @internal */
 function runSyncOrLog<
-  T extends Record<string, TableDescriptor<any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any>>,
+  T extends Record<string, TableDescriptor<any, any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[] = readonly TypedRelation[]
 >(
   hooks: LifecycleHook<T, Rels>[],
@@ -74,7 +74,7 @@ function runSyncOrLog<
  * @category Lifecycle
  */
 export class LifecycleManager<
-  T extends Record<string, TableDescriptor<any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any>>,
+  T extends Record<string, TableDescriptor<any, any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[] = readonly TypedRelation[]
 > {
   private startHooks: LifecycleHook<T, Rels>[] = [];

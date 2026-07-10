@@ -92,7 +92,7 @@ export interface CreateORMBaseOptions {
  */
 
 export interface CreateORMOptions<
-  T extends Record<string, TableDescriptor<any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any>>,
+  T extends Record<string, TableDescriptor<any, any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[] = readonly TypedRelation[]
 > extends CreateORMBaseOptions {
   /** table schemas */
@@ -191,22 +191,36 @@ export interface CreateORMOptions<
  * ```
  */
 export type foxdb<
-  Tables extends Record<string, TableDescriptor<any, any, any, any>>,
+  Tables extends Record<string, TableDescriptor<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[] = readonly TypedRelation[]
 > = {
   [K in keyof Tables]: Tables[K] extends TableDescriptor<
     infer TWrite extends TSchema & { properties: Record<string, TSchema> },
     infer PKName extends string,
     infer Timestamps,
-    infer G extends GeneratedColumnConfig | undefined
+    infer G extends GeneratedColumnConfig | undefined,
+    infer F
   >
-  ? Repository<
-    TWrite,
-    QuerySchema<TWrite, G>,
-    PKName extends ScalarKeys<TWrite> ? PKName : never,
-    Materialized<TWrite, Tables, Rels, K & string>,
-    TimestampShape<Timestamps>
-  >
+  ? import("./types.ts").FTSEnabled<F> extends true
+    ? Repository<
+        TWrite,
+        QuerySchema<TWrite, G>,
+        PKName extends ScalarKeys<TWrite> ? PKName : never,
+        Materialized<TWrite, Tables, Rels, K & string>,
+        TimestampShape<Timestamps>,
+        import("./types.ts").FTSFields<TWrite, F> & string
+      >
+    : Omit<
+        Repository<
+          TWrite,
+          QuerySchema<TWrite, G>,
+          PKName extends ScalarKeys<TWrite> ? PKName : never,
+          Materialized<TWrite, Tables, Rels, K & string>,
+          TimestampShape<Timestamps>,
+          never
+        >,
+        "search" | "searchAsync"
+      >
   : never;
 } & {
   /** run a transaction */
@@ -239,7 +253,7 @@ export type foxdb<
 
 /** create a typed orm instance backed by sqlite */
 export function createORM<
-  const T extends Record<string, TableDescriptor<any, any, any, any>>,
+  const T extends Record<string, TableDescriptor<any, any, any, any, any>>,
   const Rels extends readonly TypedRelation[] = readonly TypedRelation[]
 >(opts: CreateORMOptions<T, Rels>): foxdb<T, Rels> {
   const dbPath = opts.path ?? ":memory:";

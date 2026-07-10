@@ -129,7 +129,8 @@ export class Repository<
   TQuery extends TSchema & { properties: Record<string, TSchema> },
   PK extends ScalarKeys<TWrite>,
   Mat = never,
-  TS = {}
+  TS = {},
+  FTS extends string = never
 > {
   readonly tableName: string;
   /** table metadata - columns, sub-tables, indexes */
@@ -155,7 +156,8 @@ export class Repository<
     TWrite,
     PK & string,
     import("./types.ts").TimestampConfig,
-    GeneratedColumnConfig | undefined
+    GeneratedColumnConfig | undefined,
+    import("./types.ts").FTSConfig | undefined
   >;
   private _entityProto: object | null = null;
   private readonly _timestampNames: { createdAt: string | null; updatedAt: string | null };
@@ -192,7 +194,8 @@ export class Repository<
       TWrite,
       PK & string,
       import("./types.ts").TimestampConfig,
-      GeneratedColumnConfig | undefined
+      GeneratedColumnConfig | undefined,
+      import("./types.ts").FTSConfig | undefined
     >,
     db: BunDatabase,
     readScheduler?: ReadScheduler,

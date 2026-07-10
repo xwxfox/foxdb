@@ -54,7 +54,7 @@ export type ExtractEventPayload<
  * @category Events
  */
 export interface ORMEvents<
-  Tables extends Record<string, TableDescriptor<any, any, any, any>>
+  Tables extends Record<string, TableDescriptor<any, any, any, any, any>>
 > {
   /** listen to lifecycle events (start, ready, shutdown, exit, fail) */
   on<K extends (keyof LifecycleEventMap) & string>(
