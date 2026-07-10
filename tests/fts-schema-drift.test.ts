@@ -10,11 +10,11 @@ describe("fts schema drift", () => {
   afterEach(() => unlinkDbFiles(PATH));
 
   test("reopening an fts table with sync:error does not report drift, and index still works", () => {
-    const orm = createORM({ path: PATH, rebuildOnLaunch: true, tables: { docs: table(S, (s) => ({ primaryKey: s.id, fts: true as const })) } });
+    const orm = createORM({ path: PATH, rebuildOnLaunch: true, tables: { docs: table(S, (s) => ({ primaryKey: s.id, fts: true })) } });
     orm.docs.insert({ id: "1", title: "hello", body: "world" });
     orm._close();
 
-    const orm2 = createORM({ path: PATH, sync: "error", tables: { docs: table(S, (s) => ({ primaryKey: s.id, fts: true as const })) } });
+    const orm2 = createORM({ path: PATH, sync: "error", tables: { docs: table(S, (s) => ({ primaryKey: s.id, fts: true })) } });
     expect(orm2.docs.search("hello").exec()).toHaveLength(1);
     orm2._close();
   });

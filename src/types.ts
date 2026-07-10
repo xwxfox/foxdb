@@ -691,7 +691,9 @@ export type FTSConfiguredFields<F> =
 
 /** The searchable field-name union for a table given its FTS config. @internal */
 export type FTSFields<T extends TSchema & { properties: Record<string, TSchema> }, F> =
-  F extends { columns: readonly ColumnRef<string, TScalarSchema>[] }
+  [F] extends [undefined] ? never
+  : [F] extends [false] ? never
+  : F extends { columns: readonly ColumnRef<string, TScalarSchema>[] }
     ? FTSConfiguredFields<F>
     : FTSAllTextFields<T>;
 

@@ -9,7 +9,7 @@ describe("fts nested/flattened columns", () => {
   afterEach(() => orm?._close());
 
   test("fts:true indexes flattened nested string columns", () => {
-    orm = createORM({ tables: { t: table(S, (s) => ({ primaryKey: s.id, fts: true as const })) } });
+    orm = createORM({ tables: { t: table(S, (s) => ({ primaryKey: s.id, fts: true })) } });
     orm.t.insert({ id: "1", customer: { name: "Ada Lovelace", city: "London" } });
     const rows = orm.t.search("Lovelace").exec();
     expect(rows).toHaveLength(1);
@@ -24,7 +24,7 @@ describe("fts nested/flattened columns", () => {
   });
 
   test("drop() removes the fts virtual table", () => {
-    orm = createORM({ tables: { t: table(S, (s) => ({ primaryKey: s.id, fts: true as const })) } });
+    orm = createORM({ tables: { t: table(S, (s) => ({ primaryKey: s.id, fts: true })) } });
     orm.t.insert({ id: "1", customer: { name: "x", city: "y" } });
     orm.t.drop();
     const exists = orm.t.raw(
