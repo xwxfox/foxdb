@@ -14,7 +14,7 @@ export function ftsTableName(tableName: string): string {
 export function resolveFtsColumns(meta: TableMeta, fts: FTSConfig): string[] {
   if (fts === true || (typeof fts === "object" && !fts.columns)) {
     const cols = meta.columns
-      .filter((c) => !c.generated && c.sqlType === "TEXT" && (c.decode ?? ColDecode.Scalar) === ColDecode.Scalar && c.name !== meta.primaryKey)
+      .filter((c) => !c.generated && c.sqlType === "TEXT" && (c.decode ?? ColDecode.Scalar) === ColDecode.Scalar)
       .map((c) => c.name);
     if (cols.length === 0) {
       raise("FTS_NO_TEXT_COLUMNS", `foxdb: table "${meta.tableName}" has fts enabled but no TEXT columns to index`, { table: meta.tableName });

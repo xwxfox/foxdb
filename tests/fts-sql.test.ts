@@ -21,7 +21,7 @@ describe("fts sql builders", () => {
 
   test("resolveFtsColumns(true) picks TEXT scalar columns only", () => {
     const cols = resolveFtsColumns(meta, true);
-    expect(cols.sort()).toEqual(["body", "title"]);
+    expect(cols.sort()).toEqual(["body", "id", "title"]);
   });
 
   test("resolveFtsColumns with explicit list", () => {
