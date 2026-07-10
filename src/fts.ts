@@ -87,3 +87,150 @@ export function buildFtsRebuildSQL(tableName: string): string {
   const ft = ftsTableName(tableName);
   return `INSERT INTO "${ft}"("${ft}") VALUES('rebuild')`;
 }
+
+// --- FTS search SQL builder + chainable builder class --------------------------
+
+import type { SQLQueryBindings } from "./database.ts";
+import type { ConditionNode } from "./filter-builder.ts";
+import { buildWhereFromNodes, FilterBuilder } from "./filter-builder.ts";
+import type { TSchema } from "typebox";
+
+export interface FtsSnippetSpec { field: string; open: string; close: string; ellipsis: string; tokens: number; }
+export interface FtsHighlightSpec { field: string; open: string; close: string; }
+
+export interface FtsSearchState {
+  query: string;
+  limit?: number;
+  offset?: number;
+  weightMap?: Record<string, number>;
+  weights?: number[];
+  snippets: FtsSnippetSpec[];
+  highlights: FtsHighlightSpec[];
+  includeDeleted: boolean;
+  nodes: ConditionNode[];
+}
+
+export type FtsResult<E> = E & { _score: number; _snippet: Record<string, string>; _highlight: Record<string, string> };
+
+export function buildFtsSearchSql(
+  tableName: string,
+  ftsColumns: string[],
+  state: FtsSearchState,
+  softDeleteColumn: string | undefined,
+  meta: TableMeta
+): { sql: string; params: SQLQueryBindings[]; snippetAliases: Array<{ field: string; alias: string }>; highlightAliases: Array<{ field: string; alias: string }> } {
+  const ft = ftsTableName(tableName);
+  const colIndex = new Map(ftsColumns.map((c, i) => [c, i]));
+
+  let bm25 = `bm25("${ft}")`;
+  if (state.weights && state.weights.length > 0) {
+    const w = state.weights.map((n) => {
+      if (typeof n !== "number" || !Number.isFinite(n)) throw new Error("fts weight must be a finite number");
+      return String(n);
+    });
+    bm25 = `bm25("${ft}", ${w.join(", ")})`;
+  }
+
+  const innerSelect: string[] = [`rowid AS "_rid"`, `${bm25} AS "_score"`];
+  const innerParams: SQLQueryBindings[] = [];
+  const snippetAliases: Array<{ field: string; alias: string }> = [];
+  const highlightAliases: Array<{ field: string; alias: string }> = [];
+
+  for (const sp of state.snippets) {
+    const idx = colIndex.get(sp.field);
+    if (idx === undefined) throw new Error(`fts snippet: "${sp.field}" is not an indexed column`);
+    const alias = `_snip_${sp.field}`;
+    innerSelect.push(`snippet("${ft}", ${idx}, ?, ?, ?, ?) AS "${alias}"`);
+    innerParams.push(sp.open, sp.close, sp.ellipsis, sp.tokens);
+    snippetAliases.push({ field: sp.field, alias });
+  }
+  for (const hp of state.highlights) {
+    const idx = colIndex.get(hp.field);
+    if (idx === undefined) throw new Error(`fts highlight: "${hp.field}" is not an indexed column`);
+    const alias = `_hl_${hp.field}`;
+    innerSelect.push(`highlight("${ft}", ${idx}, ?, ?) AS "${alias}"`);
+    innerParams.push(hp.open, hp.close);
+    highlightAliases.push({ field: hp.field, alias });
+  }
+
+  const where = buildWhereFromNodes(state.nodes, state.includeDeleted ? undefined : softDeleteColumn, meta);
+  const outerWhere = where.sql ? ` ${where.sql}` : "";
+
+  const outerSelect = [
+    `"${tableName}".*`,
+    `m."_score"`,
+    ...snippetAliases.map((s) => `m."${s.alias}"`),
+    ...highlightAliases.map((h) => `m."${h.alias}"`),
+  ].join(", ");
+
+  const limitParts: string[] = [];
+  const limitParams: SQLQueryBindings[] = [];
+  if (state.limit !== undefined) { limitParts.push("LIMIT ?"); limitParams.push(state.limit); }
+  if (state.offset !== undefined) { limitParts.push("OFFSET ?"); limitParams.push(state.offset); }
+
+  const sql = [
+    `SELECT ${outerSelect}`,
+    `FROM (SELECT ${innerSelect.join(", ")} FROM "${ft}" WHERE "${ft}" MATCH ?) m`,
+    `JOIN "${tableName}" ON "${tableName}".rowid = m."_rid"`,
+    outerWhere,
+    `ORDER BY m."_score"`,
+    limitParts.join(" "),
+  ].filter(Boolean).join(" ");
+
+  return {
+    sql,
+    params: [...innerParams, state.query, ...where.params, ...limitParams],
+    snippetAliases,
+    highlightAliases,
+  };
+}
+
+export class FtsSearchBuilder<
+  TQuery extends TSchema & { properties: Record<string, TSchema> },
+  TEntity,
+  FTS extends string
+> {
+  _state: FtsSearchState;
+  constructor(
+    query: string,
+    private _exec: (state: FtsSearchState) => FtsResult<TEntity>[],
+    private _execAsync?: (state: FtsSearchState) => Promise<FtsResult<TEntity>[]>
+  ) {
+    this._state = { query, snippets: [], highlights: [], includeDeleted: false, nodes: [] };
+  }
+
+  limit(n: number): this { this._state.limit = n; return this; }
+  offset(n: number): this { this._state.offset = n; return this; }
+  includeDeleted(): this { this._state.includeDeleted = true; return this; }
+
+  weight(field: FTS, w: number): this {
+    (this._state.weightMap ??= {})[field as string] = w;
+    return this;
+  }
+  weights(map: Partial<Record<FTS, number>>): this {
+    for (const [k, v] of Object.entries(map)) if (typeof v === "number") this.weight(k as FTS, v);
+    return this;
+  }
+
+  snippet(field: FTS, opts?: { open?: string; close?: string; ellipsis?: string; tokens?: number }): this {
+    this._state.snippets.push({ field: field as string, open: opts?.open ?? "<b>", close: opts?.close ?? "</b>", ellipsis: opts?.ellipsis ?? "…", tokens: opts?.tokens ?? 15 });
+    return this;
+  }
+  highlight(field: FTS, opts?: { open?: string; close?: string }): this {
+    this._state.highlights.push({ field: field as string, open: opts?.open ?? "[", close: opts?.close ?? "]" });
+    return this;
+  }
+
+  where(cb: (q: FilterBuilder<TQuery, unknown>) => void): this {
+    const child = new FilterBuilder<TQuery, unknown>();
+    cb(child);
+    for (const n of child._nodes) this._state.nodes.push(n);
+    return this;
+  }
+
+  exec(): FtsResult<TEntity>[] { return this._exec(this._state); }
+  execAsync(): Promise<FtsResult<TEntity>[]> {
+    if (this._execAsync) return this._execAsync(this._state);
+    return Promise.resolve().then(() => this._exec(this._state));
+  }
+}

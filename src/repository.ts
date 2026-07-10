@@ -65,6 +65,7 @@ import type { ColumnCodec } from "./codec.ts";
 import {
   ftsTableName, resolveFtsColumns, buildCreateFtsSQL,
   buildFtsIndexInsert, buildFtsDeleteCommand, buildFtsDeleteAllSQL, buildFtsRebuildSQL,
+  buildFtsSearchSql, FtsSearchBuilder, type FtsSearchState, type FtsResult,
 } from "./fts.ts";
 import {
   buildSelect,
@@ -2778,6 +2779,70 @@ export class Repository<
     }
 
     return ab;
+  }
+
+  /**
+   * Full-text search (FTS5). Present only on tables with `fts` enabled.
+   * @group Reading - Chain API
+   */
+  search(query: string): FtsSearchBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS>, FTS> {
+    const meta = this.meta;
+    const tableName = this.tableName;
+    const ftsColumns = this._ftsColumns;
+    const softDeleteCol = this.descriptor.softDelete?.column;
+    const executor = this._executor;
+    const readScheduler = this._readScheduler;
+    const codecs = this._codecs;
+    const wrap = this._wrapNoSubs.bind(this);
+    const emit = this._emit.bind(this);
+
+    const resolveWeights = (state: FtsSearchState): void => {
+      if (!state.weightMap) return;
+      state.weights = ftsColumns.map((c) => (c in state.weightMap! ? state.weightMap![c]! : 1.0));
+    };
+
+    const attach = (
+      rows: Record<string, unknown>[],
+      snips: Array<{ field: string; alias: string }>,
+      hls: Array<{ field: string; alias: string }>
+    ): FtsResult<Entity<Infer<TQuery>, Mat, TS>>[] =>
+      rows.map((r) => {
+        const entity = wrap(hydrateRow(r, meta, EMPTY_MAP, codecs)) as Record<string, unknown>;
+        const scoreVal = r["_score"];
+        entity["_score"] = typeof scoreVal === "number" ? scoreVal : Number(scoreVal);
+        const snippet: Record<string, string> = {};
+        for (const s of snips) snippet[s.field] = String(r[s.alias] ?? "");
+        const highlight: Record<string, string> = {};
+        for (const h of hls) highlight[h.field] = String(r[h.alias] ?? "");
+        entity["_snippet"] = snippet;
+        entity["_highlight"] = highlight;
+        return entity as FtsResult<Entity<Infer<TQuery>, Mat, TS>>;
+      });
+
+    const run = (state: FtsSearchState): FtsResult<Entity<Infer<TQuery>, Mat, TS>>[] => {
+      resolveWeights(state);
+      const { sql, params, snippetAliases, highlightAliases } = buildFtsSearchSql(tableName, ftsColumns, state, softDeleteCol, meta);
+      const rows = executor.all<Record<string, unknown>>(sql, params, "search");
+      const results = attach(rows, snippetAliases, highlightAliases);
+      emit("findMany", { options: { fts: state.query }, result: results as unknown as Infer<TQuery>[] });
+      return results;
+    };
+
+    const runAsync = readScheduler
+      ? async (state: FtsSearchState): Promise<FtsResult<Entity<Infer<TQuery>, Mat, TS>>[]> => {
+          resolveWeights(state);
+          const { sql, params, snippetAliases, highlightAliases } = buildFtsSearchSql(tableName, ftsColumns, state, softDeleteCol, meta);
+          const rows = await readScheduler.exec<Record<string, unknown>[]>(sql, params);
+          return attach(rows, snippetAliases, highlightAliases);
+        }
+      : undefined;
+
+    return new FtsSearchBuilder<TQuery, Entity<Infer<TQuery>, Mat, TS>, FTS>(query, run, runAsync);
+  }
+
+  /** Convenience async full-text search. Present only on tables with `fts` enabled. */
+  searchAsync(query: string): Promise<FtsResult<Entity<Infer<TQuery>, Mat, TS>>[]> {
+    return this.search(query).execAsync();
   }
 
   // --- Update ----------------------------------------------------------------
