@@ -664,11 +664,11 @@ export type FTSConfig =
   | true
   | {
       /** Columns to index. Omit to index all TEXT columns. */
-      columns?: ColumnRef<string, TScalarSchema>[];
+      columns?: readonly ColumnRef<string, TScalarSchema>[];
       /** FTS5 tokenizer directive, e.g. "porter unicode61", "trigram". Default: "unicode61". */
       tokenizer?: string;
       /** FTS5 prefix-index sizes, e.g. [2, 3]. */
-      prefix?: number[];
+      prefix?: readonly number[];
     };
 
 /** True when a table has FTS enabled. @internal */
@@ -691,10 +691,9 @@ export type FTSConfiguredFields<F> =
 
 /** The searchable field-name union for a table given its FTS config. @internal */
 export type FTSFields<T extends TSchema & { properties: Record<string, TSchema> }, F> =
-  [F] extends [true] ? FTSAllTextFields<T>
-  : F extends { columns: readonly ColumnRef<string, TScalarSchema>[] } ? FTSConfiguredFields<F>
-  : F extends object ? FTSAllTextFields<T>
-  : never;
+  F extends { columns: readonly ColumnRef<string, TScalarSchema>[] }
+    ? FTSConfiguredFields<F>
+    : FTSAllTextFields<T>;
 
 // --- Generated Columns (object-based config) ------------------------------------
 

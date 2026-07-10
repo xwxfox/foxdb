@@ -62,7 +62,7 @@ export function table<
   PK extends string,
   TS extends TimestampConfig = undefined,
   G extends GeneratedColumnConfig | undefined = undefined,
-  F extends FTSConfig | undefined = undefined
+  const F extends FTSConfig | undefined = undefined
 >(
   schema: T,
   configure: (columns: ColumnRefs<T>) => TableConfigShape<PK, TS, G, F>

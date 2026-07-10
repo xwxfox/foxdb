@@ -32,7 +32,7 @@ const e2: FTSEnabled<undefined> = false;
 void [e1, e2];
 
 // table() accepts fts config forms
-const _t1 = table(S, (s) => ({ primaryKey: s.id, fts: true as const }));
+const _t1 = table(S, (s) => ({ primaryKey: s.id, fts: true }));
 const _t2 = table(S, (s) => ({ primaryKey: s.id, fts: { columns: [s.title, s.body] } }));
 const _t3 = table(S, (s) => ({ primaryKey: s.id })); // no fts
 void [_t1, _t2, _t3];
@@ -52,7 +52,7 @@ function _ftsGating() {
   withFts.docs.search("x").snippet("body");
   withFts._close();
 
-  const withAll = createORM({ tables: { docs: table(S, (s) => ({ primaryKey: s.id, fts: true as const })) } });
+  const withAll = createORM({ tables: { docs: table(S, (s) => ({ primaryKey: s.id, fts: true })) } });
   withAll.docs.search("x").highlight("meta__note").exec();
   // @ts-expect-error views is Integer, not text
   withAll.docs.search("x").highlight("views");
