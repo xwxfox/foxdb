@@ -2815,9 +2815,6 @@ export class Repository<
       traceBegin("repo.update.mergeAndFlatten");
       // Validate by merging with existing to produce a complete schema-valid object
       const existingObj = this._hydrateOne(flatRow);
-      for (const k of Object.keys(existingObj)) {
-        if (existingObj[k] === null) delete existingObj[k];
-      }
       const merged = this.parse({ ...existingObj, ...data });
       const mergedObj = this._record(merged);
       if (this._hasTimestamps && this._timestampNames.updatedAt) {
