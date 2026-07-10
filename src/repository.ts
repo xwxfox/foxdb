@@ -65,6 +65,7 @@ import type { ColumnCodec } from "./codec.ts";
 import {
   ftsTableName, resolveFtsColumns, buildCreateFtsSQL,
   buildFtsIndexInsert, buildFtsDeleteCommand, buildFtsDeleteAllSQL, buildFtsRebuildSQL,
+  buildFtsInsertDirectSQL, buildFtsDeleteDirectSQL,
   buildFtsSearchSql, FtsSearchBuilder, type FtsSearchState, type FtsResult,
 } from "./fts.ts";
 import {
@@ -187,6 +188,8 @@ export class Repository<
   private readonly _ftsTableName: string;
   private readonly _ftsColumns: string[];
   private readonly _ftsColumnSet: Set<string>;
+  private readonly _ftsInsertDirectSql: string;
+  private readonly _ftsDeleteDirectSql: string;
 
   /** @internal */
   setEventBus(bus: EventBus): void {
@@ -278,11 +281,15 @@ export class Repository<
       this._ftsTableName = ftsTableName(tableName);
       this._ftsColumns = resolveFtsColumns(this.meta, config.fts as FTSConfig);
       this._ftsColumnSet = new Set(this._ftsColumns);
+      this._ftsInsertDirectSql = buildFtsInsertDirectSQL(tableName, this._ftsColumns);
+      this._ftsDeleteDirectSql = buildFtsDeleteDirectSQL(tableName, this._ftsColumns);
     } else {
       this._ftsEnabled = false;
       this._ftsTableName = "";
       this._ftsColumns = [];
       this._ftsColumnSet = new Set();
+      this._ftsInsertDirectSql = "";
+      this._ftsDeleteDirectSql = "";
     }
 
     this._migrate();
@@ -672,7 +679,6 @@ export class Repository<
       }
       const doInsert = () => {
         this._insertRow(obj);
-        if (this._ftsEnabled) this._ftsIndexByPk([this._assertPk(obj[this.descriptor.primaryKey.name]) as string | number]);
       };
       if (this.db._txDepth > 0) {
         doInsert();
@@ -699,12 +705,20 @@ export class Repository<
     for (let i = 0; i < colsLen; i++) {
       params[i] = flat[this.meta.insertColumns[i]!.name] as SQLQueryBindings;
     }
-    this._executor.exec(
+    const mainRes = this._executor.exec(
       `INSERT INTO "${this.tableName}" (${this._insertColsSql}) VALUES (${this._insertPlaceholders})`,
       params,
       "insert"
     );
     traceEnd();
+
+    if (this._ftsEnabled) {
+      this._executor.exec(
+        this._ftsInsertDirectSql,
+        this._ftsBindInsert(Number(mainRes.lastInsertRowid), flat),
+        "insert"
+      );
+    }
 
     const pkVal = obj[this.descriptor.primaryKey.name];
 
@@ -1048,9 +1062,10 @@ export class Repository<
   /** Internal raw row fetch without hydration - used by update() */
   private _findFlatRow(id: Infer<TQuery>[PK]): Record<string, unknown> | null {
     const pk = this.descriptor.primaryKey.name;
+    const cols = this._ftsEnabled ? `*, "rowid" AS "_fts_rowid"` : `*`;
     const sql = this.descriptor.softDelete
-      ? `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? AND "${this.descriptor.softDelete.column}" IS NULL LIMIT 1`
-      : `SELECT * FROM "${this.tableName}" WHERE "${pk}" = ? LIMIT 1`;
+      ? `SELECT ${cols} FROM "${this.tableName}" WHERE "${pk}" = ? AND "${this.descriptor.softDelete.column}" IS NULL LIMIT 1`
+      : `SELECT ${cols} FROM "${this.tableName}" WHERE "${pk}" = ? LIMIT 1`;
     return this._executor.get<Record<string, unknown>>(
       sql,
       [id as string | number | bigint | null],
@@ -2893,9 +2908,11 @@ export class Repository<
       traceEnd();
 
       const doUpdate = () => {
-        const pkNum = this._assertPk(rawPk) as string | number;
         const touches = this._patchTouchesFts(patch);
-        if (touches) this._ftsDeleteByPk([pkNum]);
+        const ftsRowid = touches ? Number((flatRow as Record<string, unknown>)["_fts_rowid"]) : 0;
+        if (touches) {
+          this._executor.exec(this._ftsDeleteDirectSql, this._ftsBindDelete(ftsRowid, flatRow), "update");
+        }
 
         traceBegin("repo.update.execMain");
         const { sql, params } = buildUpdate(this.tableName, pk, this._assertPk(rawPk), patch);
@@ -2925,7 +2942,13 @@ export class Repository<
         }
         traceEnd();
 
-        if (touches) this._ftsIndexByPk([pkNum]);
+        if (touches) {
+          const newVals: SQLQueryBindings[] = [ftsRowid];
+          for (const c of this._ftsColumns) {
+            newVals.push((c in patch ? patch[c] : flatRow[c]) as SQLQueryBindings);
+          }
+          this._executor.exec(this._ftsInsertDirectSql, newVals, "update");
+        }
       };
 
       if (this.db._txDepth > 0) {
@@ -3196,6 +3219,17 @@ export class Repository<
     if (!this._ftsEnabled) return false;
     for (const k of Object.keys(patch)) if (this._ftsColumnSet.has(k)) return true;
     return false;
+  }
+
+  private _ftsBindInsert(rowid: number, flat: Record<string, unknown>): SQLQueryBindings[] {
+    const p: SQLQueryBindings[] = [rowid];
+    for (const c of this._ftsColumns) p.push(flat[c] as SQLQueryBindings);
+    return p;
+  }
+  private _ftsBindDelete(rowid: number, flat: Record<string, unknown>): SQLQueryBindings[] {
+    const p: SQLQueryBindings[] = [rowid];
+    for (const c of this._ftsColumns) p.push(flat[c] as SQLQueryBindings);
+    return p;
   }
 
   // --- Sub-table hydration ---------------------------------------------------

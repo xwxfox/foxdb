@@ -88,6 +88,22 @@ export function buildFtsRebuildSQL(tableName: string): string {
   return `INSERT INTO "${ft}"("${ft}") VALUES('rebuild')`;
 }
 
+/** Pre-built INSERT ... VALUES template for direct-bind (single-row). Returns the SQL only — bind rowid + column values as params. */
+export function buildFtsInsertDirectSQL(tableName: string, columns: string[]): string {
+  const ft = ftsTableName(tableName);
+  const cols = ["rowid", ...columns].map((c) => `"${c}"`).join(", ");
+  const phs = columns.map(() => "?").join(", ");
+  return `INSERT INTO "${ft}"(${cols}) VALUES (?, ${phs})`;
+}
+
+/** Pre-built FTS5 'delete' command with direct-bound values (single-row). SQL only — bind rowid + column values as params. */
+export function buildFtsDeleteDirectSQL(tableName: string, columns: string[]): string {
+  const ft = ftsTableName(tableName);
+  const colList = [`"${ft}"`, `"rowid"`, ...columns.map((c) => `"${c}"`)].join(", ");
+  const phs = columns.map(() => "?").join(", ");
+  return `INSERT INTO "${ft}"(${colList}) VALUES ('delete', ?, ${phs})`;
+}
+
 // --- FTS search SQL builder + chainable builder class --------------------------
 
 import type { SQLQueryBindings } from "./database.ts";
