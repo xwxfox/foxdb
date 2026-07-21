@@ -473,4 +473,4 @@ bun --feature DEBUG_SQL_FILE run ./app.ts
 
 ## license
 
-MIT
+mit uwu
