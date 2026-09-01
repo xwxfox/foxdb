@@ -39,7 +39,7 @@ describe("repository.aggregate", () => {
   });
 
   test("sum aggregation", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       aggregations: { total: { sum: "amount" } },
     });
     expect(rows).toHaveLength(1);
@@ -47,7 +47,7 @@ describe("repository.aggregate", () => {
   });
 
   test("count aggregation with *", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       aggregations: { total: { count: "*" } },
     });
     expect(rows).toHaveLength(1);
@@ -55,7 +55,7 @@ describe("repository.aggregate", () => {
   });
 
   test("count aggregation with column", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       aggregations: { total: { count: "status" } },
     });
     expect(rows).toHaveLength(1);
@@ -63,7 +63,7 @@ describe("repository.aggregate", () => {
   });
 
   test("avg aggregation", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       aggregations: { mean: { avg: "amount" } },
     });
     expect(rows).toHaveLength(1);
@@ -71,7 +71,7 @@ describe("repository.aggregate", () => {
   });
 
   test("min and max aggregation", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       aggregations: { minAmount: { min: "amount" }, maxAmount: { max: "amount" } },
     });
     expect(rows).toHaveLength(1);
@@ -80,7 +80,7 @@ describe("repository.aggregate", () => {
   });
 
   test("groupBy with aggregation", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       groupBy: ["status"],
       aggregations: { total: { sum: "amount" }, count: { count: "*" } },
     });
@@ -93,7 +93,7 @@ describe("repository.aggregate", () => {
   });
 
   test("where filter with aggregation", () => {
-    const rows = orm.orders.aggregate({
+    const rows = orm.orders.O_aggregate({
       where: { status: { eq: "completed" } },
       aggregations: { total: { sum: "amount" } },
     });
@@ -106,7 +106,7 @@ describe("repository.aggregate", () => {
     orm._events.on("orders", "aggregate", (payload) => {
       captured = payload;
     });
-    orm.orders.aggregate({
+    orm.orders.O_aggregate({
       aggregations: { total: { sum: "amount" } },
     });
     expect(captured).toBeDefined();

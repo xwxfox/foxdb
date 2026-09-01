@@ -4,13 +4,11 @@
  * and exposes the materializer for eager loading.
  */
 
-import type { TObject, TSchema } from "typebox";
+import type { TSchema } from "typebox";
 import type {
   ScalarKeys,
-  TableConfig,
   RelationsConfig,
   Materialized,
-  Entity,
   MetaAccessors,
   TimestampShape,
   QuerySchema,
@@ -18,24 +16,25 @@ import type {
 } from "./types.ts";
 import type { TypedRelation } from "./typed-relation.ts";
 import { BunDatabase } from "./database.ts";
-import type { SQLQueryBindings } from "./database.ts";
 import { Repository } from "./repository.ts";
-import { introspectTable, convertGeneratedConfig } from "./schema.ts";
+import { introspectTable, buildColumns, convertGeneratedConfig } from "./schema.ts";
 import { createRelationBuilder, type RelationBuilder } from "./relations.ts";
 import { MetaStore } from "./meta.ts";
 import { inspectAllTables } from "./inspector.ts";
 import { computeDiff, type DesiredTable } from "./diff.ts";
 import { applySync } from "./sync.ts";
 import { migrate } from "./migrate.ts";
+import { sqlFileClose } from "./tracing.ts";
 import type { SyncPolicy, ErrorPolicy, UnlinkPolicy, QueryMetricsHook } from "./types.ts";
 import { EventBus, type ORMEvents } from "./events.ts";
 import { LifecycleManager } from "./lifecycle.ts";
 import type { ORMContext, LifecycleHook } from "./lifecycle.ts";
-import { handleError, ORMError, raise, currentTrace } from "./errors.ts";
+import { ORMError, raise, currentTrace } from "./errors.ts";
 import { unlinkDbFiles } from "./database.ts";
 import type { TableDescriptor } from "./table.ts";
+import { ReadScheduler } from "./asyncDatabasePool/scheduler.ts";
 
-// ─── Options ──────────────────────────────────────────────────────────────────
+// --- Options ------------------------------------------------------------------
 
 /**
  * Base options for opening a SQLite database.
@@ -52,6 +51,15 @@ export interface CreateORMBaseOptions {
   vacuumIntervalMs?: number;
   /** disable fsync during large initial loads */
   bulkLoadMode?: boolean;
+  /** number of worker threads for async read queries (enables *Async methods) */
+  asyncReaderPool?: number;
+  /**
+   * How sub-table foreign key deletions are handled.
+   * - `"native"` (default): SQLite ON DELETE CASCADE - FK verification on INSERT.
+   * - `"foxdb"`: No FK in DDL, foxdb handles cascading in application code - faster INSERTs.
+   * - `"none"`: No FK, no cascade - sub-table rows become orphaned on parent delete.
+   */
+  onDeleteBehavior?: "native" | "foxdb" | "none";
 }
 
 /**
@@ -84,7 +92,7 @@ export interface CreateORMBaseOptions {
  */
 
 export interface CreateORMOptions<
-  T extends Record<string, TableDescriptor<any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any>>,
+  T extends Record<string, TableDescriptor<any, any, any, any, any>> = Record<string, TableDescriptor<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[] = readonly TypedRelation[]
 > extends CreateORMBaseOptions {
   /** table schemas */
@@ -96,7 +104,7 @@ export interface CreateORMOptions<
   /** migration directory */
   migrations?: { dir: string };
 
-  // ─── Lifecycle & QoL ────────────────────────────────────────────────────────
+  // --- Lifecycle & QoL --------------------------------------------------------
   /** runs before schema validation */
   onStart?: LifecycleHook<T, Rels>;
   /** runs after the db is fully ready */
@@ -131,14 +139,14 @@ export interface CreateORMOptions<
   hooks?: QueryMetricsHook;
 }
 
-// ─── ORM return type ──────────────────────────────────────────────────────────
+// --- ORM return type ----------------------------------------------------------
 
 /**
  * The ORM object returned by `createORM`.
  *
  * Every key in your `tables` config becomes a fully typed **Repository**
  * with CRUD methods. The type definition below is a mapped type that
- * transforms your schema config into the actual runtime API — TypeDoc
+ * transforms your schema config into the actual runtime API - TypeDoc
  * cannot expand it, so see the example for how it works in practice.
  *
  * @see {@link Repository} for the full method reference
@@ -153,7 +161,7 @@ export interface CreateORMOptions<
  *   },
  * });
  *
- * // ─── Every table key is a Repository ───
+ * // --- Every table key is a Repository ---
  *
  * // Insert
  * orm.users.insert({ id: "u1", name: "alice" });
@@ -172,7 +180,7 @@ export interface CreateORMOptions<
  * orm.users.deleteById("u1");
  * orm.users.deleteWhere({ status: { eq: "banned" } });
  *
- * // ─── Framework methods (prefixed with _) ───
+ * // --- Framework methods (prefixed with _) ---
  *
  * orm._transaction(() => {
  *   orm.users.insert({ id: "t1", name: "txn" });
@@ -183,22 +191,36 @@ export interface CreateORMOptions<
  * ```
  */
 export type foxdb<
-  Tables extends Record<string, TableDescriptor<any, any, any, any>>,
+  Tables extends Record<string, TableDescriptor<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[] = readonly TypedRelation[]
 > = {
   [K in keyof Tables]: Tables[K] extends TableDescriptor<
     infer TWrite extends TSchema & { properties: Record<string, TSchema> },
     infer PKName extends string,
     infer Timestamps,
-    infer G extends GeneratedColumnConfig | undefined
+    infer G extends GeneratedColumnConfig | undefined,
+    infer F
   >
-  ? Repository<
-    TWrite,
-    QuerySchema<TWrite, G>,
-    PKName extends ScalarKeys<TWrite> ? PKName : never,
-    Materialized<TWrite, Tables, Rels, K & string>,
-    TimestampShape<Timestamps>
-  >
+  ? import("./types.ts").FTSEnabled<F> extends true
+    ? Repository<
+        TWrite,
+        QuerySchema<TWrite, G>,
+        PKName extends ScalarKeys<TWrite> ? PKName : never,
+        Materialized<TWrite, Tables, Rels, K & string>,
+        TimestampShape<Timestamps>,
+        import("./types.ts").FTSFields<TWrite, F> & string
+      >
+    : Omit<
+        Repository<
+          TWrite,
+          QuerySchema<TWrite, G>,
+          PKName extends ScalarKeys<TWrite> ? PKName : never,
+          Materialized<TWrite, Tables, Rels, K & string>,
+          TimestampShape<Timestamps>,
+          never
+        >,
+        "search" | "searchAsync"
+      >
   : never;
 } & {
   /** run a transaction */
@@ -227,11 +249,11 @@ export type foxdb<
   _events: ORMEvents<Tables>;
 };
 
-// ─── Factory ──────────────────────────────────────────────────────────────────
+// --- Factory ------------------------------------------------------------------
 
 /** create a typed orm instance backed by sqlite */
 export function createORM<
-  const T extends Record<string, TableDescriptor<any, any, any, any>>,
+  const T extends Record<string, TableDescriptor<any, any, any, any, any>>,
   const Rels extends readonly TypedRelation[] = readonly TypedRelation[]
 >(opts: CreateORMOptions<T, Rels>): foxdb<T, Rels> {
   const dbPath = opts.path ?? ":memory:";
@@ -246,8 +268,27 @@ export function createORM<
   }
   let accessors: foxdb<T, Rels>;
   const events = new EventBus();
+  let readScheduler: ReadScheduler | undefined;
 
   try {
+    // Create async reader pool if configured
+    // Workers open the same file read-only - incompatible with :memory: (each
+    // connection gets its own isolated memory region, so workers can never see
+    // the writer's data). When path is :memory: we skip the pool and async
+    // methods fall back to Promise.resolve().then(sync) transparently.
+    if (opts.asyncReaderPool && opts.asyncReaderPool >= 1) {
+      const canPool = dbPath !== ":memory:" && dbPath.length > 0;
+      if (canPool) {
+        readScheduler = new ReadScheduler({
+          path: dbPath,
+          cacheSize: opts.cacheSize,
+          busyTimeout: opts.busyTimeout,
+          synchronous: opts.synchronous,
+          mmapSize: opts.mmapSize,
+        }, opts.asyncReaderPool);
+      }
+    }
+
     // Validate tables object
     const tableEntries = Object.entries(opts.tables);
     if (tableEntries.length === 0) {
@@ -258,12 +299,13 @@ export function createORM<
     const repos = new Map<string, Repository<any, any, any, any>>();
 
     for (const [name, config] of tableEntries) {
-      const meta = introspectTable(
-        name,
-        config.schema,
-        convertGeneratedConfig(config.generated)
-      );
-      const colNames = new Set(meta.columns.map((c) => c.name));
+      const columns = buildColumns(config.schema.properties, [], 0, true);
+      const colNames = new Set(columns.map((c) => c.name));
+      // Include generated column names in the validation set
+      const generated = convertGeneratedConfig(config.generated);
+      if (generated) {
+        for (const g of generated) colNames.add(g.name);
+      }
 
       // Validate primaryKey
       const pkName = config.primaryKey.name;
@@ -288,12 +330,12 @@ export function createORM<
         }
       }
 
-      const repo = new Repository(name, config, db);
+      const repo = new Repository(name, config, db, readScheduler, opts.onDeleteBehavior);
       repos.set(name, repo);
     }
 
     // Wire EventBus into repositories
-    for (const [name, repo] of repos) {
+    for (const [_name, repo] of repos) {
       repo.setEventBus(events);
     }
 
@@ -406,7 +448,7 @@ export function createORM<
       }
     }
 
-    // ─── Build desired schema for diffing ───────────────────────────────────────
+    // --- Build desired schema for diffing ---------------------------------------
 
     const desiredTables: DesiredTable[] = [];
     for (const [name, config] of tableEntries) {
@@ -439,7 +481,7 @@ export function createORM<
       }
     }
 
-    // ─── Persist metadata ───────────────────────────────────────────────────────
+    // --- Persist metadata -------------------------------------------------------
 
     const meta = new MetaStore(db);
 
@@ -466,7 +508,7 @@ export function createORM<
     meta.setJSON("_relations", relations);
     meta.setString("_foxdb_version", "0.0.2");
 
-    // ─── Build and inject materializers ─────────────────────────────────────────
+    // --- Build and inject materializers -----------------------------------------
 
     function materialize(
       ownerTable: string,
@@ -480,7 +522,7 @@ export function createORM<
         result[k] = v;
       }
 
-      // ── Scalar relations (lazy) ───────────────────────────────────────────────
+      // -- Scalar relations (lazy) -----------------------------------------------
       const scalarRels = tableRels.filter((r) => r.kind === "scalar");
       if (scalarRels.length > 0) {
         const related = new Proxy(
@@ -523,7 +565,7 @@ export function createORM<
         }
       }
 
-      // ── Sub-table relations (batch per materialize call) ──────────────────────
+      // -- Sub-table relations (batch per materialize call) ----------------------
       const subTableRels = tableRels.filter((r) => r.kind === "subTable");
       for (const rel of subTableRels) {
         const [subField, fkField] = rel.ownerField.split(".") as [string, string];
@@ -750,7 +792,7 @@ export function createORM<
       return results;
     }
 
-    // ─── Metadata helpers ───────────────────────────────────────────────────────
+    // --- Metadata helpers -------------------------------------------------------
 
     function flush(opts?: { includeMeta?: boolean }): void {
       for (const repo of repos.values()) {
@@ -763,7 +805,7 @@ export function createORM<
       }
     }
 
-    // ─── Typed meta accessors ───────────────────────────────────────────────────
+    // --- Typed meta accessors ---------------------------------------------------
 
     const metaAccessors: MetaAccessors = {
       get schemaHash() {
@@ -784,7 +826,7 @@ export function createORM<
       },
     };
 
-    // ─── Inject materializers into repositories ─────────────────────────────────
+    // --- Inject materializers into repositories ---------------------------------
 
     for (const [name, repo] of repos) {
       const tableRels = relations.filter((r) => r.ownerTable === name);
@@ -796,7 +838,7 @@ export function createORM<
       );
     }
 
-    // ─── Build accessor object with getters ─────────────────────────────────────
+    // --- Build accessor object with getters -------------------------------------
 
     accessors = Object.create(null);
 
@@ -876,6 +918,8 @@ export function createORM<
         }
       }
 
+      sqlFileClose();
+      readScheduler?.terminate();
       db.close();
 
       lifecycle.runExit(ctx);
@@ -907,8 +951,16 @@ export function createORM<
     }
 
     // Assign public API before lifecycle hooks so ctx.orm._meta etc. are available
+    const tx = db.transaction.bind(db);
     Object.assign(accessors, {
-      _transaction: db.transaction.bind(db),
+      _transaction: ((fn: () => any): any => {
+        db._txDepth++;
+        try {
+          return tx(fn);
+        } finally {
+          db._txDepth--;
+        }
+      }) as typeof tx,
       _close: close,
       _setBulkLoadMode(enabled: boolean): void {
         db.setSynchronous(enabled ? "OFF" : "NORMAL");

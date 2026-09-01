@@ -60,7 +60,7 @@ describe("repository.insertMany multi-value", () => {
     const inserted = orm.users.insertMany(records);
     expect(inserted).toHaveLength(500);
 
-    const count = orm.users.count();
+    const count = orm.users.O_count();
     expect(count).toBe(500);
 
     const found = orm.users.findById("u499");
@@ -80,7 +80,7 @@ describe("repository.insertMany multi-value", () => {
     const elapsed = performance.now() - start;
 
     expect(inserted).toHaveLength(50000);
-    expect(orm.users.count()).toBe(50000);
+    expect(orm.users.O_count()).toBe(50000);
     // Should complete in under 5 seconds with multi-value insert
     expect(elapsed).toBeLessThan(5000);
   });

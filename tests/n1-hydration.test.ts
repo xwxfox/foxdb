@@ -9,7 +9,7 @@ describe("N+1 safe hydration", () => {
     for (let i = 0; i < 100; i++) {
       orm.sales.insert({ id: `${i}`, lineItems: [{ sku: "A" }] });
     }
-    const all = orm.sales.findMany({ include: ["lineItems"] });
+    const all = orm.sales.O_findMany({ include: ["lineItems"] });
     expect(all).toHaveLength(100);
     expect(all[0]!.lineItems).toHaveLength(1);
     orm._close();

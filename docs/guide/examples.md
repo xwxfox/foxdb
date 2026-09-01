@@ -106,9 +106,9 @@ orm._events.on("users", "write", (e) => {
 });
 ```
 
-## Soft Deletes with Lifecycle
+## Table Flushing
 
-Flush a table on shutdown instead of hard-deleting during the request:
+Flush a table on shutdown:
 
 ```typescript
 createORM({
@@ -117,6 +117,30 @@ createORM({
   },
   flushOnExit: ["sessions"], // truncate before close
   unlinkDbFilesOnExit: true,  // clean up .db files too
+});
+```
+
+## Soft Deletes
+
+Use soft deletes to keep deleted rows recoverable:
+
+```typescript
+const orm = createORM({
+  tables: {
+    users: table(UserSchema, (s) => ({
+      primaryKey: s.id,
+      softDelete: { column: "deletedAt" },
+    })),
+  },
+});
+
+// regular queries exclude soft-deleted rows automatically
+const active = orm.users.O_findMany({ where: { status: { eq: "active" } } });
+
+// include soft-deleted rows when needed
+const all = orm.users.O_findMany({
+  where: { status: { eq: "active" } },
+  includeDeleted: true,
 });
 ```
 
@@ -130,7 +154,6 @@ import type { Migration } from "@xwxfox/foxdb";
 
 export default {
   name: "init",
-  date: "2024-01-15",
   up(db) {
     db.exec("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)");
   },

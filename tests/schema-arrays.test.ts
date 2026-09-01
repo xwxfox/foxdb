@@ -8,7 +8,7 @@ const SchemaWithPrimitiveArrays = Type.Object({
   scores: Type.Array(Type.Number()),
 });
 
-test("arrays of primitives should get a TEXT column", () => {
+test("arrays of primitives stay as TEXT columns", () => {
   const meta = introspectTable("test", SchemaWithPrimitiveArrays);
   const tagsCol = meta.columns.find(c => c.name === "tags");
   const scoresCol = meta.columns.find(c => c.name === "scores");
@@ -16,6 +16,9 @@ test("arrays of primitives should get a TEXT column", () => {
   expect(tagsCol?.sqlType).toBe("TEXT");
   expect(scoresCol).toBeDefined();
   expect(scoresCol?.sqlType).toBe("TEXT");
+
+  expect(meta.subTables.find(s => s.fieldName === "tags")).toBeUndefined();
+  expect(meta.subTables.find(s => s.fieldName === "scores")).toBeUndefined();
 });
 
 test("buildColumns handles arrays of primitives as TEXT", () => {
@@ -47,9 +50,11 @@ test("optional primitive arrays produce nullable and optional true", () => {
   expect(metaTagsCol?.sqlType).toBe("TEXT");
   expect(metaTagsCol?.nullable).toBe(true);
   expect(metaTagsCol?.optional).toBe(true);
+
+  expect(meta.subTables.find(s => s.fieldName === "tags")).toBeUndefined();
 });
 
-test("arrays of booleans and integers are treated as TEXT", () => {
+test("arrays of booleans and integers stay as TEXT columns", () => {
   const schema = Type.Object({
     id: Type.Number(),
     flags: Type.Array(Type.Boolean()),
@@ -71,6 +76,8 @@ test("arrays of booleans and integers are treated as TEXT", () => {
   expect(metaFlagsCol?.sqlType).toBe("TEXT");
   expect(metaCountsCol).toBeDefined();
   expect(metaCountsCol?.sqlType).toBe("TEXT");
+
+  expect(meta.subTables).toHaveLength(0);
 });
 
 test("nested objects and object arrays still produce expected columns", () => {
@@ -105,9 +112,12 @@ test("nested objects and object arrays still produce expected columns", () => {
   expect(metaTagsCol).toBeDefined();
   expect(metaTagsCol?.sqlType).toBe("TEXT");
 
-  const subTable = meta.subTables.find(s => s.fieldName === "lineItems");
-  expect(subTable).toBeDefined();
-  expect(subTable?.tableName).toBe("test__lineItems");
-  expect(subTable?.columns.map(c => c.name)).toContain("name");
-  expect(subTable?.columns.map(c => c.name)).toContain("qty");
+  const lineItemsSub = meta.subTables.find(s => s.fieldName === "lineItems");
+  expect(lineItemsSub).toBeDefined();
+  expect(lineItemsSub?.tableName).toBe("test__lineItems");
+  expect(lineItemsSub?.columns.map(c => c.name)).toContain("name");
+  expect(lineItemsSub?.columns.map(c => c.name)).toContain("qty");
+
+  // tags is a scalar array - stays as TEXT column, not a sub-table
+  expect(meta.subTables.find(s => s.fieldName === "tags")).toBeUndefined();
 });

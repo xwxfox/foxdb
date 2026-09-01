@@ -47,18 +47,30 @@ const found = orm.users.findById("usr-1");
 // update
 orm.users.update({ id: "usr-1", name: "alice smith" });
 
-// query
-const adults = orm.users.findMany({
-  where: { age: { gte: 18 } },
-  orderBy: { column: "name", direction: "ASC" },
-});
+// query (chain api)
+const adults = orm.users
+  .findMany()
+  .greaterThanOrEqual("age", 18)
+  .orderBy("name", "ASC")
+  .exec();
 
 // paginate
-const page = orm.users.findPage({
-  where: { age: { gte: 18 } },
-  limit: 10,
-  offset: 0,
-});
+const page = orm.users
+  .findPage()
+  .greaterThanOrEqual("age", 18)
+  .limit(10)
+  .page(0)
+  .exec();
+
+// count
+const total = orm.users.count().greaterThanOrEqual("age", 18).exec();
+
+// aggregate
+const stats = orm.users
+  .aggregate()
+  .avg("age")
+  .groupBy("name")
+  .exec();
 
 orm._close();
 ```
@@ -67,11 +79,14 @@ orm._close();
 
 - **zero codegen** - your typebox schema *is* the source of truth. no `prisma generate`, no migration files to keep in sync :3
 - **fully typed** - every query, insert, update, and relation is typed end-to-end. try passing the wrong column name and typescript will bonk you
-- **tiny** - ~2kb overhead on top of `bun:sqlite`. no external query builder, no connection pool, no bloat
+- **chain query api** - `findMany().where({...}).orderBy(...).limit(10).exec()` with full type autocomplete
 - **relations** - scalar relations (lazy) and sub-table relations (batch resolved) with a fluent builder
 - **events** - listen to table events (`insert`, `update`, `read`, `write`, etc.) typed to your schema. zero overhead unless you subscribe ~
 - **lifecycle hooks** - `onStart`, `onReady`, `onShutdown`, `onExit` for seeding, migrating, cleaning up
-- **sub-tables** - arrays of objects are automatically split into separate sqlite tables with proper indexing
+- **sub-tables** - arrays of objects are automatically split into separate sqlite tables with proper FK cascade and indexing
+- **soft deletes** - configurable per-table soft delete column, auto-filtered from all queries
+- **compression** - per-column gzip compression for large text columns
+- **eviction** - automatic row cleanup with TTL or max-row limits
 
 ## core concepts
 
@@ -93,14 +108,14 @@ const OrderSchema = Object({
   customerId: String(),
   status: String(),
   total: Number(),
-  tags: Array(String()),          // becomes a JSON string column ~
+  tags: Array(String()),          // becomes a sub-table with _value column ~
   lineItems: Array(LineItemSchema), // becomes a sub-table ~
 });
 ```
 
 ### tables
 
-the `table()` helper turns a schema into a table descriptor. you pick the primary key, add indexes, and optionally enable timestamps.
+the `table()` helper turns a schema into a table descriptor. you pick the primary key, add indexes, and configure table options.
 
 ```typescript
 table(OrderSchema, (s) => ({
@@ -109,26 +124,90 @@ table(OrderSchema, (s) => ({
     { columns: [s.customerId] },
     { columns: [s.status] },
   ],
-  timestamps: true, // adds createdAt / updatedAt
+  timestamps: true,                      // adds createdAt / updatedAt
+  softDelete: { column: "deletedAt" },   // soft delete support
+  compression: {                         // gzip specific columns
+    algorithm: "gzip",
+    columns: [s.notes],
+  },
+  eviction: {                            // auto-cleanup old rows
+    ttlColumn: "createdAt",
+    ttlMs: 24 * 60 * 60 * 1000,         // 24 hours
+    maxRows: 100000,
+  },
 }))
 ```
 
 ### repositories
 
-every table becomes a repository on the orm object. all crud methods are fully typed:
+every table becomes a repository on the orm object. all crud methods are fully typed.
 
+**Writing:**
 - `insert(data)` - insert a record
 - `insertMany(records)` - batch insert in a transaction
-- `findById(id)` - find by primary key
-- `findMany(opts)` - query with where, orderBy, limit, offset
-- `findPage(opts)` - findMany + total count for pagination
-- `findOne(opts)` - findMany with limit 1
 - `update(data)` - merge partial data (must include pk)
-- `upsert(opts)` - insert or update on conflict
-- `deleteById(id)` - delete by pk
+- `updateWhere({ where, data })` - bulk update matching records
+- `upsert({ data, conflictTarget })` - insert or update on conflict
+- `upsertMany({ data, conflictTarget })` - bulk upsert
+- `deleteById(id)` - delete by pk (fk cascade on sub-tables)
 - `deleteWhere(where)` - delete matching records
-- `count(where?)` - count matching records
-- `flush()` - truncate the table and sub-tables
+- `flush()` - truncate table and sub-tables
+- `drop()` - drop table entirely
+
+**Reading (chain api):**
+- `findMany().where({...}).orderBy(...).limit(10).exec()` - fluent query builder
+- `findOne().equals("id", "x").exec()` - single record query
+- `findPage().limit(10).page(0).exec()` - paginated query with total count
+- `findCursorPage().orderBy(...).limit(25).exec()` - cursor-based pagination
+- `count().greaterThan("age", 18).exec()` - count with optional filter
+- `aggregate().avg("price").groupBy("category").exec()` - aggregate queries
+- `O_iterate({ where, limit })` - lazy generator iteration
+
+**Validation:**
+- `parse(data)` - validate and return typed data without inserting
+- `check(data)` - type guard, returns true if data matches schema
+
+### chain query api
+
+the chain api gives you fluent, type-safe query building:
+
+```typescript
+const results = orm.users
+  .findMany()
+  .equals("status", "active")
+  .greaterThanOrEqual("age", 18)
+  .orderBy("createdAt", "DESC")
+  .limit(10)
+  .select(["id", "name", "email"])
+  .exec();
+
+// array filters on scalar sub-tables
+const tagged = orm.users
+  .findMany()
+  .arraySome("tags", "admin")
+  .exec();
+
+// nested sub-table filters
+const withItem = orm.orders
+  .findMany()
+  .nested("lineItems", (li) => li.equals("sku", "WIDGET"))
+  .exec();
+```
+
+### sub-table filtering
+
+filter parent rows by sub-table content using dotted paths:
+
+```typescript
+// find orders containing a specific line item
+orm.orders.O_findMany({
+  where: { "lineItems.sku": { eq: "WIDGET" } }
+})
+
+// internally generates: EXISTS (SELECT 1 FROM orders__lineItems WHERE _owner_id = orders.id AND "sku" = ?)
+```
+
+sub-tables use `ON DELETE CASCADE` foreign keys - deleting a parent row auto-deletes all sub-rows.
 
 ### relations
 
@@ -152,6 +231,9 @@ const order = orm.orders.findById("ord-1");
 for (const item of order.lineItems) {
   console.log(item.product.name); // lazy or batch resolved :3
 }
+
+// batch resolve all relations eagerly
+const orders = orm.orders.findManyMaterialized({ limit: 50 });
 ```
 
 ### events
@@ -209,6 +291,22 @@ const orm = createORM({
 });
 ```
 
+### batch writing
+
+for high-throughput insert streaming, use `createBatchWriter`:
+
+```typescript
+const writer = orm.events.createBatchWriter({
+  maxBuffer: 1000,          // flush when 1000 rows buffered
+  flushIntervalMs: 5000,    // or every 5 seconds
+});
+
+for (const event of eventStream) {
+  writer.insert({ id: event.id, type: event.type, data: event.data });
+}
+writer.close(); // final flush
+```
+
 ### configuration
 
 ```typescript
@@ -217,6 +315,8 @@ createORM({
   cacheSize: -64000,             // sqlite cache size in pages
   busyTimeout: 5000,             // ms to wait for write locks
   synchronous: "NORMAL",         // pragma synchronous level
+  mmapSize: 268435456,           // 256 MB memory-mapped i/o
+  autoVacuum: "incremental",     // reclaim free pages
   rebuildOnLaunch: false,        // wipe and rebuild on start
   flushOnStart: ["logs"],        // truncate tables before seeding
   dropOnExit: ["temp"],          // drop tables before close
@@ -224,12 +324,80 @@ createORM({
   migrations: { dir: "./migrations" },
   errorPolicy: "throw",          // "throw" | "emit" | "emit-swallow" | "crash"
   unlinkDbFilesOnExit: false,    // true | "onlyGraceful" | "any"
+  sync: "auto",                  // schema drift policy: "ignore" | "warn" | "error" | "auto"
+  hooks: {
+    onQuery: (meta) => {         // query metrics hook
+      if (meta.durationMs > 100) console.warn("slow query", meta);
+    },
+  },
 })
 ```
 
+### sub-tables
+
+arrays of objects are automatically split into child tables with:
+- `_id` autoincrement primary key
+- `_owner_id` foreign key with `ON DELETE CASCADE` back to parent
+- `_index` ordering column
+- Automatic indexes on `_owner_id` and TEXT columns
+- Batch-hydrated on `include` for N+1 safety
+
+arrays of scalars get a `_value` column with indexes for fast `arraySome`/`arrayNot` filtering.
+
+### soft deletes
+
+configure a soft delete column to keep deleted rows recoverable:
+
+```typescript
+table(Schema, (s) => ({
+  primaryKey: s.id,
+  softDelete: { column: "deletedAt" },
+}))
+```
+
+all queries automatically exclude soft-deleted rows. pass `includeDeleted: true` to see them:
+
+```typescript
+orm.users.O_findMany({ where: { status: { eq: "active" } }, includeDeleted: true })
+```
+
+### full-text search
+
+enable FTS5 on any table by adding `fts: true` (indexes all TEXT columns) or `fts: { columns: [...] }` (explicit column list). Cues `.search()` appears **only** on tables with FTS enabled — zero overhead on other tables:
+
+```typescript
+table(PostSchema, (s) => ({
+  primaryKey: s.id,
+  fts: { columns: [s.title, s.body] },  // or fts: true for all TEXT columns
+}))
+```
+
+the `.search()` chain API returns full entities augmented with `_score` (bm25 rank), plus optional `_snippet` and `_highlight`:
+
+```typescript
+// basic search — returns [{ ...entity, _score, _snippet, _highlight }]
+const matches = orm.posts.search("quick fox").limit(10).exec();
+
+// with column weights (bm25), snippets, highlights, and extra filters
+const rich = orm.posts
+  .search("database")
+  .weights({ title: 2, body: 0.5 })
+  .snippet("body", { tokens: 20 })
+  .highlight("title")
+  .where((q) => q.equals("published", true))
+  .limit(10)
+  .exec();
+
+for (const m of rich) {
+  console.log(`#${m.id} ${m._highlight.title} — ${m._snippet.body} (score: ${m._score})`);
+}
+```
+
+the FTS5 index is an **external-content** table (no data duplication). foxdb keeps it in sync across `insert`, `insertMany`, `update`, `updateWhere`, `upsert`, `upsertMany`, `deleteById`, `deleteWhere`, `flush`, and `drop` — all within the same transaction. soft-deleted rows are excluded from search unless `.includeDeleted()` is called. the virtual table prefix (`_foxdb_fts_`) ensures it never triggers schema drift on reopen.
+
 ## error handling
 
-foxdb uses `ORMError` with invisible trace context. every throw includes the operation name, table, sql, and parameters that led to the error:
+foxdb uses `ORMError` with trace context. every throw includes the operation name, table, sql, and parameters that led to the error:
 
 ```typescript
 try {
@@ -247,17 +415,16 @@ configure the error policy to crash, emit, swallow, or just throw.
 
 ## migrations
 
-foxdb can auto-run migrations on startup. create migration files and point `migrations.dir` at them:
+auto-run timestamped migration files on startup. each migration runs in a transaction:
 
 ```typescript
-// migrations/001-init.ts
+// ./migrations/001_add_notes.ts
 import type { Migration } from "@xwxfox/foxdb";
 
 export default {
-  name: "init",
-  date: "2024-01-15",
+  name: "add_notes",
   up(db) {
-    // raw sql via db.exec() if needed
+    db.exec(`ALTER TABLE users ADD COLUMN notes TEXT`);
   },
 } satisfies Migration;
 ```
@@ -268,6 +435,40 @@ createORM({
   migrations: { dir: "./migrations" },
   autoMigrate: true,
 });
+```
+
+tracked in `_foxdb_migrations` so each migration runs exactly once.
+
+## generated columns
+
+sqlite computed columns defined in your schema:
+
+```typescript
+import { Generated } from "@xwxfox/foxdb";
+
+table(OrderSchema, (s) => ({
+  primaryKey: s.id,
+  generated: {
+    totalWithTax: { expr: `"total" * 1.25`, type: Number() },
+  },
+}))
+```
+
+generated columns are read-only - they're computed automatically by sqlite and excluded from INSERT/UPDATE.
+
+## debugging
+
+foxdb has three feature flags for debugging:
+
+```bash
+# trace every operation with timing breakdowns
+bun --feature DEBUG_TRACING run ./app.ts
+
+# log how sql is built (query plans, where clause resolution, ddl decisions)
+bun --feature DEBUG_SQL_BUILDING run ./app.ts
+
+# emit all executed sql to ./foxdb-queries.sql with sections and params
+bun --feature DEBUG_SQL_FILE run ./app.ts
 ```
 
 ## license

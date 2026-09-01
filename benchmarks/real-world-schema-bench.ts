@@ -11,10 +11,12 @@ function makeORM(indexed = false) {
     // path: ":memory:",
     path: "./bench.db",
     rebuildOnLaunch: true,
+
     tables: {
       sales: table(SaleSchema, (s) => ({
         primaryKey: s.OrderNumber,
         indexes: indexed ? [{ columns: [s.Status__Group] }] : [],
+        autoIndex: false
       })),
     },
   });
@@ -259,7 +261,7 @@ console.log("Warming up...");
   const orm = makeORM();
   for (let i = 0; i < 100; i++) orm.sales.insert(makeSale(i));
   orm.sales.findById(50);
-  orm.sales.findMany({ limit: 50 });
+  orm.sales.O_findMany({ limit: 50 });
   orm._close();
 }
 
@@ -293,7 +295,7 @@ await runBenchmark("FINDMANY paginated throughput", (count) => {
   const orm = makeORM();
   for (let i = 0; i < count; i++) orm.sales.insert(makeSale(i));
   const t0 = performance.now();
-  orm.sales.findMany({ limit: Math.min(count, 1000) });
+  orm.sales.O_findMany({ limit: Math.min(count, 1000) });
   const dt = performance.now() - t0;
   console.log(`  [inner] paginated findMany(limit=${Math.min(count, 1000)}) in ${Math.round(dt)}ms`);
   orm._close();
@@ -305,7 +307,7 @@ await runBenchmark("Flattened column query (no index)", (count) => {
   for (let i = 0; i < count; i++) orm.sales.insert(makeSale(i));
   const t0 = performance.now();
   for (let i = 0; i < Math.min(count, 100); i++) {
-    orm.sales.findMany({ where: { "Status.Group": { eq: "PNP" } } });
+    orm.sales.O_findMany({ where: { "Status.Group": { eq: "PNP" } } });
   }
   const dt = performance.now() - t0;
   console.log(`  [inner] ${Math.min(count, 100)} flattened queries in ${Math.round(dt)}ms = ${Math.round(Math.min(count, 100) / (dt / 1000))} ops/sec`);
@@ -318,7 +320,7 @@ await runBenchmark("Flattened column query (with index)", (count) => {
   for (let i = 0; i < count; i++) orm.sales.insert(makeSale(i));
   const t0 = performance.now();
   for (let i = 0; i < Math.min(count, 100); i++) {
-    orm.sales.findMany({ where: { "Status.Group": { eq: "PNP" } } });
+    orm.sales.O_findMany({ where: { "Status.Group": { eq: "PNP" } } });
   }
   const dt = performance.now() - t0;
   console.log(`  [inner] ${Math.min(count, 100)} indexed flattened queries in ${Math.round(dt)}ms = ${Math.round(Math.min(count, 100) / (dt / 1000))} ops/sec`);
@@ -331,7 +333,7 @@ await runBenchmark("True JSON path query throughput", (count) => {
   for (let i = 0; i < count; i++) orm.sales.insert(makeSale(i));
   const t0 = performance.now();
   for (let i = 0; i < Math.min(count, 100); i++) {
-    orm.sales.findMany({ where: { "CustomerInfo.CustomerAddress.Country": { eq: "DK" } } });
+    orm.sales.O_findMany({ where: { "CustomerInfo.CustomerAddress.Country": { eq: "DK" } } });
   }
   const dt = performance.now() - t0;
   console.log(`  [inner] ${Math.min(count, 100)} JSON path queries in ${Math.round(dt)}ms = ${Math.round(Math.min(count, 100) / (dt / 1000))} ops/sec`);
@@ -343,7 +345,7 @@ await runBenchmark("SUBTABLE hydration throughput", (count) => {
   const orm = makeORM();
   for (let i = 0; i < Math.min(count, 10000); i++) orm.sales.insert(makeSale(i));
   const t0 = performance.now();
-  orm.sales.findMany({ include: ["SalesLineItems"], limit: Math.min(count, 1000) });
+  orm.sales.O_findMany({ include: ["SalesLineItems"], limit: Math.min(count, 1000) });
   const dt = performance.now() - t0;
   console.log(`  [inner] hydrated ${Math.min(count, 1000)} rows with sub-table in ${Math.round(dt)}ms`);
   orm._close();
@@ -367,7 +369,7 @@ await runBenchmark("COUNT aggregate throughput", (count) => {
   const orm = makeORM();
   for (let i = 0; i < count; i++) orm.sales.insert(makeSale(i));
   const t0 = performance.now();
-  orm.sales.count({});
+  orm.sales.O_count({});
   const dt = performance.now() - t0;
   console.log(`  [inner] count() over ${count} rows in ${Math.round(dt)}ms`);
   orm._close();
@@ -382,7 +384,7 @@ await runBenchmark("MIXED workload", (count) => {
   for (let i = 0; i < batch; i++) {
     orm.sales.findById(i % count);
     if (i % 10 === 0) orm.sales.update({ OrderNumber: i % count, SearchName: `Mix ${i}` });
-    if (i % 50 === 0) orm.sales.findMany({ where: { Account: { eq: 42 } }, limit: 10 });
+    if (i % 50 === 0) orm.sales.O_findMany({ where: { Account: { eq: 42 } }, limit: 10 });
   }
   const dt = performance.now() - t0;
   console.log(`  [inner] ${batch} mixed ops in ${Math.round(dt)}ms = ${Math.round(batch / (dt / 1000))} ops/sec`);

@@ -41,7 +41,7 @@ describe("repository.findCursorPage", () => {
   });
 
   test("returns first page with nextCursor", () => {
-    const page = orm.orders.findCursorPage({
+    const page = orm.orders.O_findCursorPage({
       orderBy: { column: "amount", direction: "ASC" },
       limit: 2,
     });
@@ -52,11 +52,11 @@ describe("repository.findCursorPage", () => {
   });
 
   test("navigates forward with next cursor", () => {
-    const p1 = orm.orders.findCursorPage({
+    const p1 = orm.orders.O_findCursorPage({
       orderBy: { column: "amount", direction: "ASC" },
       limit: 2,
     });
-    const p2 = orm.orders.findCursorPage({
+    const p2 = orm.orders.O_findCursorPage({
       orderBy: { column: "amount", direction: "ASC" },
       cursor: { ...p1.nextCursor!, direction: "next" },
       limit: 2,
@@ -66,16 +66,16 @@ describe("repository.findCursorPage", () => {
   });
 
   test("navigates backward with prev cursor", () => {
-    const p1 = orm.orders.findCursorPage({
+    const p1 = orm.orders.O_findCursorPage({
       orderBy: { column: "amount", direction: "ASC" },
       limit: 2,
     });
-    const p2 = orm.orders.findCursorPage({
+    const p2 = orm.orders.O_findCursorPage({
       orderBy: { column: "amount", direction: "ASC" },
       cursor: { ...p1.nextCursor!, direction: "next" },
       limit: 2,
     });
-    const p3 = orm.orders.findCursorPage({
+    const p3 = orm.orders.O_findCursorPage({
       orderBy: { column: "amount", direction: "ASC" },
       cursor: { ...p2.prevCursor!, direction: "prev" },
       limit: 2,
@@ -85,7 +85,7 @@ describe("repository.findCursorPage", () => {
   });
 
   test("works with DESC order", () => {
-    const page = orm.orders.findCursorPage({
+    const page = orm.orders.O_findCursorPage({
       orderBy: { column: "amount", direction: "DESC" },
       limit: 2,
     });
@@ -94,7 +94,7 @@ describe("repository.findCursorPage", () => {
   });
 
   test("respects where clause", () => {
-    const page = orm.orders.findCursorPage({
+    const page = orm.orders.O_findCursorPage({
       where: { amount: { gte: 30 } },
       orderBy: { column: "amount", direction: "ASC" },
       limit: 2,

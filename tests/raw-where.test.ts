@@ -39,7 +39,7 @@ describe("_raw SQL escape hatch", () => {
   });
 
   test("_raw filters via raw SQL", () => {
-    const rows = orm.users.findMany({
+    const rows = orm.users.O_findMany({
       where: {
         _raw: { sql: "age > ?", params: [20] },
       },
@@ -48,7 +48,7 @@ describe("_raw SQL escape hatch", () => {
   });
 
   test("_raw combined with typed filters", () => {
-    const rows = orm.users.findMany({
+    const rows = orm.users.O_findMany({
       where: {
         name: { eq: "alice" },
         _raw: { sql: "age >= ?", params: [30] },

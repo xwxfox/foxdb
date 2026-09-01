@@ -54,7 +54,6 @@ export default defineConfig({
         {
           text: "Guide",
           items: [
-            { text: "Hi! :3", link: "/guide/readme" },
             { text: "Getting Started", link: "/guide/getting-started" },
             { text: "Core Concepts", link: "/guide/core-concepts" },
             { text: "Examples", link: "/guide/examples" },
@@ -90,7 +89,7 @@ export default defineConfig({
 
   // Build hooks
 
-  // Runs in both dev and production — injects per-page metadata automatically
+  // Runs in both dev and production - injects per-page metadata automatically
   transformPageData(pageData, { siteConfig }) {
     const ogImageUrl = `${SITE_URL}${OG_IMAGE}`;
     const canonical = `${SITE_URL}/${pageData.relativePath}`

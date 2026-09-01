@@ -13,8 +13,10 @@ import type {
 } from "./types.ts";
 import type { TableMeta } from "./schema.ts";
 import { raise } from "./errors.ts";
+import { feature } from "bun:bundle";
+import { sqlDebug, traceBegin, traceEnd } from "./tracing.ts";
 
-// ─── WHERE builder ────────────────────────────────────────────────────────────
+// --- WHERE builder ------------------------------------------------------------
 
 type FilterEntry = { sql: string; params: SQLQueryBindings[] };
 
@@ -50,6 +52,39 @@ function escapeSqlString(value: string): string {
 }
 
 /**
+ * Resolves a dotted column path that references a sub-table field.
+ * e.g. "SalesLineItems.ItemNumber" → subquery on sales__SalesLineItems
+ */
+function resolveSubTableColumn(
+  column: string,
+  meta?: TableMeta
+): { subTableName: string; subColumn: string; ownerPk: string } | null {
+  if (!meta) return null;
+  const parts = column.split(".");
+  if (parts.length < 2) return null;
+
+  const firstSegment = parts[0]!;
+  const sub = meta.subTables.find((s) => s.fieldName === firstSegment);
+  if (!sub) return null;
+
+  const remainingPath = parts.slice(1).join(".");
+  const subCol = sub.columnByPath.get(remainingPath);
+  if (!subCol && parts.length === 2) {
+    // Direct column access on sub-table, e.g. "SalesLineItems.ItemNumber"
+    // Check if the column exists by name
+    const directCol = sub.columnByName.get(remainingPath);
+    if (directCol) {
+      return { subTableName: sub.tableName, subColumn: directCol.name, ownerPk: meta.primaryKey! };
+    }
+    return null;
+  }
+  if (subCol) {
+    return { subTableName: sub.tableName, subColumn: subCol.name, ownerPk: meta.primaryKey! };
+  }
+  return null;
+}
+
+/**
  * Resolves a dotted column path to a JSON_EXTRACT expression.
  *
  * **Known limitation:** column names containing dots are interpreted as JSON
@@ -82,15 +117,76 @@ function resolveJsonColumn(column: string, meta?: TableMeta): { sql: string } | 
   return { sql: `JSON_EXTRACT("${safeColumn}", '$.${escapeSqlString(path)}')` };
 }
 
+/** Safely convert a runtime value to SQLite-compatible binding. */
+export function toBinding(v: unknown): SQLQueryBindings {
+  if (v === null) return null;
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean" || typeof v === "bigint") return v;
+  if (v instanceof Uint8Array) return v;
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
 /** SQLite stores nested objects as JSON TEXT; mirror that when binding params. */
 function paramValue(v: unknown): SQLQueryBindings {
-  if (v !== null && typeof v === "object") return JSON.stringify(v);
-  return v as SQLQueryBindings;
+  return toBinding(v);
 }
 
 export function buildFilter(column: string, filter: FilterShape, meta?: TableMeta): FilterEntry {
+  if (feature("DEBUG_TRACING")) traceBegin("qb.buildFilter");
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildFilter input`, { column, filter, tableName: meta?.tableName });
+
+  // Check if this is a sub-table column reference, e.g. "SalesLineItems.ItemNumber"
+  const subRef = column.indexOf(".") !== -1 ? resolveSubTableColumn(column, meta) : null;
+  if (subRef) {
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildFilter sub-table resolution`, { column, subTable: subRef.subTableName, subColumn: subRef.subColumn, ownerPk: subRef.ownerPk, reason: "dotted path references sub-table field → subquery" });
+    // Generate a subquery: pk IN (SELECT _owner_id FROM subTable WHERE subColumn OP value)
+    const innerParts: string[] = [];
+    const innerParams: SQLQueryBindings[] = [];
+    const subColRef = `"${subRef.subColumn}"`;
+
+    if ("eq" in filter) { innerParts.push(`${subColRef} = ?`); innerParams.push(paramValue(filter.eq)); }
+    if ("ne" in filter) { innerParts.push(`${subColRef} != ?`); innerParams.push(paramValue(filter.ne)); }
+    if ("gt" in filter) { innerParts.push(`${subColRef} > ?`); innerParams.push(paramValue(filter.gt)); }
+    if ("gte" in filter) { innerParts.push(`${subColRef} >= ?`); innerParams.push(paramValue(filter.gte)); }
+    if ("lt" in filter) { innerParts.push(`${subColRef} < ?`); innerParams.push(paramValue(filter.lt)); }
+    if ("lte" in filter) { innerParts.push(`${subColRef} <= ?`); innerParams.push(paramValue(filter.lte)); }
+    if ("like" in filter) { innerParts.push(`${subColRef} LIKE ?`); innerParams.push(paramValue(filter.like)); }
+    if ("between" in filter) {
+      const [lo, hi] = filter.between;
+      innerParts.push(`${subColRef} BETWEEN ? AND ?`);
+      innerParams.push(paramValue(lo), paramValue(hi));
+    }
+    if ("in" in filter) {
+      const vals = filter.in;
+      const ph = vals.map(() => "?").join(", ");
+      innerParts.push(`${subColRef} IN (${ph})`);
+      innerParams.push(...vals.map(paramValue));
+    }
+    if ("notIn" in filter) {
+      const vals = filter.notIn;
+      const ph = vals.map(() => "?").join(", ");
+      innerParts.push(`${subColRef} NOT IN (${ph})`);
+      innerParams.push(...vals.map(paramValue));
+    }
+    if ("isNull" in filter) { innerParts.push(`${subColRef} IS NULL`); }
+    if ("isNotNull" in filter) { innerParts.push(`${subColRef} IS NOT NULL`); }
+
+    if (innerParts.length > 0) {
+      const innerWhere = innerParts.join(" AND ");
+      const subquery = `EXISTS (SELECT 1 FROM "${subRef.subTableName}" WHERE "${subRef.subTableName}"."_owner_id" = "${meta!.tableName}"."${subRef.ownerPk}" AND ${innerWhere})`;
+      const result: FilterEntry = { sql: subquery, params: innerParams };
+      if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildFilter sub-table result`, { column, result });
+      if (feature("DEBUG_TRACING")) traceEnd();
+      return result;
+    }
+    const emptyResult: FilterEntry = { sql: "1=0", params: [] };
+    if (feature("DEBUG_TRACING")) traceEnd();
+    return emptyResult;
+  }
+
   const jsonCol = resolveJsonColumn(column, meta);
   const colRef = jsonCol ? jsonCol.sql : `"${column}"`;
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildFilter column resolution`, { column, colRef, flattened: Boolean(jsonCol), reason: jsonCol ? "matched flattened column or JSON_EXTRACT path" : "plain column" });
 
   const parts: string[] = [];
   const params: SQLQueryBindings[] = [];
@@ -122,19 +218,58 @@ export function buildFilter(column: string, filter: FilterShape, meta?: TableMet
   if ("isNull" in filter) parts.push(`${colRef} IS NULL`);
   if ("isNotNull" in filter) parts.push(`${colRef} IS NOT NULL`);
   if ("arraySome" in filter) {
-    parts.push(`EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`);
+    const scalarSub = meta?.subTables.find(
+      st => st.fieldName === column && st.isScalar
+    );
+    const usesSubTable = Boolean(scalarSub && meta?.primaryKey);
+    if (usesSubTable) {
+      parts.push(
+        `"${meta!.primaryKey}" IN (SELECT "_owner_id" FROM "${scalarSub!.tableName}" WHERE "_value" = ?)`
+      );
+    } else {
+      parts.push(`EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`);
+    }
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildFilter arraySome choice`, { column, usesSubTable, subTable: scalarSub?.tableName, jsonColRef: colRef });
     params.push(paramValue(filter.arraySome));
   }
   if ("arrayNot" in filter) {
-    parts.push(`NOT EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`);
+    const scalarSub = meta?.subTables.find(
+      st => st.fieldName === column && st.isScalar
+    );
+    const usesSubTable = Boolean(scalarSub && meta?.primaryKey);
+    if (usesSubTable) {
+      parts.push(
+        `"${meta!.primaryKey}" NOT IN (SELECT "_owner_id" FROM "${scalarSub!.tableName}" WHERE "_value" = ?)`
+      );
+    } else {
+      parts.push(`NOT EXISTS (SELECT 1 FROM json_each(${colRef}) WHERE value = ?)`);
+    }
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildFilter arrayNot choice`, { column, usesSubTable, subTable: scalarSub?.tableName, jsonColRef: colRef });
     params.push(paramValue(filter.arrayNot));
   }
   if ("isEmpty" in filter) {
-    if (filter.isEmpty) {
-      parts.push(`(json_array_length(${colRef}) = 0 OR ${colRef} IS NULL)`);
+    const scalarSub = meta?.subTables.find(
+      st => st.fieldName === column && st.isScalar
+    );
+    const usesSubTable = Boolean(scalarSub && meta?.primaryKey);
+    if (usesSubTable) {
+      if (filter.isEmpty) {
+        parts.push(
+          `"${meta!.primaryKey}" NOT IN (SELECT DISTINCT "_owner_id" FROM "${scalarSub!.tableName}")`
+        );
+      } else {
+        parts.push(
+          `"${meta!.primaryKey}" IN (SELECT DISTINCT "_owner_id" FROM "${scalarSub!.tableName}")`
+        );
+      }
     } else {
-      parts.push(`json_array_length(${colRef}) > 0`);
+      if (filter.isEmpty) {
+        parts.push(`(json_array_length(${colRef}) = 0 OR ${colRef} IS NULL)`);
+      } else {
+        parts.push(`json_array_length(${colRef}) > 0`);
+      }
     }
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildFilter isEmpty choice`, { column, filter: filter.isEmpty, usesSubTable, subTable: scalarSub?.tableName, jsonColRef: colRef });
   }
   if ("fastArrayIsEmpty" in filter) {
     if (filter.fastArrayIsEmpty) {
@@ -160,7 +295,10 @@ export function buildFilter(column: string, filter: FilterShape, meta?: TableMet
     raise("UNKNOWN_FILTER", `foxdb: unknown filter operator for column "${column}"`, { column });
   }
 
-  return { sql: parts.join(" AND "), params };
+  const result = { sql: parts.join(" AND "), params };
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildFilter output`, { column, result });
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return result;
 }
 
 export interface WhereResult {
@@ -319,10 +457,15 @@ export function buildWhere<T extends TSchema & { properties: Record<string, TSch
   softDeleteColumn?: string | undefined,
   meta?: TableMeta | undefined
 ): WhereResult {
-  return buildWhereRecursive(where, softDeleteColumn, meta);
+  if (feature("DEBUG_TRACING")) traceBegin("qb.buildWhere");
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildWhere input`, { where, softDeleteColumn, tableName: meta?.tableName });
+  const result = buildWhereRecursive(where, softDeleteColumn, meta);
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildWhere output`, { result, tableName: meta?.tableName });
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return result;
 }
 
-// ─── ORDER BY builder ─────────────────────────────────────────────────────────
+// --- ORDER BY builder ---------------------------------------------------------
 
 export function resolveOrderByColumn(column: string, meta: TableMeta | undefined): string {
   if (!meta) return `"${column}"`;
@@ -347,22 +490,38 @@ export function buildOrderBy<T extends TSchema & { properties: Record<string, TS
   orderBy: FindOptions<T>["orderBy"],
   meta: TableMeta | undefined
 ): string {
-  if (!orderBy) return "";
+  if (feature("DEBUG_TRACING")) traceBegin("qb.buildOrderBy");
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildOrderBy input`, { orderBy, tableName: meta?.tableName });
+  if (!orderBy) {
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildOrderBy output`, { sql: "" });
+    if (feature("DEBUG_TRACING")) traceEnd();
+    return "";
+  }
   const clauses: OrderByClause<T>[] = globalThis.Array.isArray(orderBy) ? orderBy : [orderBy];
-  if (clauses.length === 0) return "";
+  if (clauses.length === 0) {
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildOrderBy output`, { sql: "" });
+    if (feature("DEBUG_TRACING")) traceEnd();
+    return "";
+  }
   const parts = clauses.map((o) => {
     const colRef = resolveOrderByColumn(o.column, meta);
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildOrderBy column`, { column: o.column, colRef, direction: o.direction ?? "ASC" });
     return `${colRef} ${o.direction ?? "ASC"}`;
   });
-  return `ORDER BY ${parts.join(", ")}`;
+  const result = `ORDER BY ${parts.join(", ")}`;
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildOrderBy output`, { result });
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return result;
 }
 
-// ─── LIMIT / OFFSET ───────────────────────────────────────────────────────────
+// --- LIMIT / OFFSET -----------------------------------------------------------
 
 export function buildLimitOffset(
   limit: number | undefined,
   offset: number | undefined
 ): { sql: string; params: SQLQueryBindings[] } {
+  if (feature("DEBUG_TRACING")) traceBegin("qb.buildLimitOffset");
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildLimitOffset input`, { limit, offset });
   const parts: string[] = [];
   const params: SQLQueryBindings[] = [];
   if (limit !== undefined) {
@@ -373,10 +532,13 @@ export function buildLimitOffset(
     parts.push("OFFSET ?");
     params.push(offset);
   }
-  return { sql: parts.join(" "), params };
+  const result = { sql: parts.join(" "), params };
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildLimitOffset output`, { result });
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return result;
 }
 
-// ─── Full SELECT builder ──────────────────────────────────────────────────────
+// --- Full SELECT builder ------------------------------------------------------
 
 export interface SelectResult {
   sql: string;
@@ -417,6 +579,8 @@ export function buildSelectSql<T extends TSchema & { properties: Record<string, 
   softDeleteColumn: string | undefined,
   meta: TableMeta | undefined
 ): SelectResult {
+  if (feature("DEBUG_TRACING")) traceBegin("qb.buildSelectSql");
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildSelectSql input`, { tableName, opts, softDeleteColumn, metaColumns: meta?.columns.length, metaSubTables: meta?.subTables.length });
   const { sql: whereSql, params: whereParams } = buildWhere(
     opts.where,
     opts.includeDeleted ? undefined : softDeleteColumn,
@@ -450,12 +614,15 @@ export function buildSelectSql<T extends TSchema & { properties: Record<string, 
     ]
       .filter(Boolean)
       .join(" ");
-    return {
+    const result = {
       sql: clauses,
       params: [...whereParams, ...limitParams],
       countSql: countClauses,
       countParams: whereParams,
     };
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildSelectSql output`, { tableName, strategy: "distinctOn", result });
+    if (feature("DEBUG_TRACING")) traceEnd();
+    return result;
   }
 
   const distinctPrefix = opts.distinct ? "DISTINCT " : "";
@@ -482,12 +649,15 @@ export function buildSelectSql<T extends TSchema & { properties: Record<string, 
     ];
   }
 
-  return {
+  const result = {
     sql: clauses,
     params: [...whereParams, ...limitParams],
     countSql: countClauses.filter(Boolean).join(" "),
     countParams: whereParams,
   };
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildSelectSql output`, { tableName, strategy: opts.distinct ? "distinct" : "normal", result });
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return result;
 }
 
 export function buildSelect<T extends TSchema & { properties: Record<string, TSchema> }>(
@@ -496,52 +666,75 @@ export function buildSelect<T extends TSchema & { properties: Record<string, TSc
   softDeleteColumn: string | undefined,
   meta: TableMeta | undefined
 ): SelectResult {
-  return buildSelectSql(tableName, opts, softDeleteColumn, meta);
+  if (feature("DEBUG_TRACING")) traceBegin("qb.buildSelect");
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildSelect input`, { tableName, opts, softDeleteColumn, tableNameMeta: meta?.tableName });
+  const result = buildSelectSql(tableName, opts, softDeleteColumn, meta);
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildSelect output`, { result });
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return result;
 }
 
-// ─── INSERT builder ───────────────────────────────────────────────────────────
+// --- INSERT builder -----------------------------------------------------------
 
 export function buildInsert(
   tableName: string,
   row: Record<string, unknown>
 ): { sql: string; params: SQLQueryBindings[] } {
+  if (feature("DEBUG_TRACING")) traceBegin("qb.buildInsert");
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildInsert input`, { tableName, row });
   const keys = Object.keys(row);
   const cols = keys.map((k) => `"${k}"`).join(", ");
   const placeholders = keys.map(() => "?").join(", ");
-  return {
+  const result = {
     sql: `INSERT INTO "${tableName}" (${cols}) VALUES (${placeholders})`,
-    params: keys.map((k) => row[k] as SQLQueryBindings),
+    params: keys.map((k) => toBinding(row[k])),
   };
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildInsert output`, { result });
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return result;
 }
 
 export function buildInsertMany(
   tableName: string,
   rows: Record<string, unknown>[],
-  maxParams = 999
+  maxParams = 999,
+  colsSql?: string,
+  valueGroup?: string,
+  keys?: string[]
 ): Array<{ sql: string; params: SQLQueryBindings[] }> {
-  if (rows.length === 0) return [];
-  const first = rows[0]!;
-  const keys = Object.keys(first);
-  const colCount = keys.length;
+  if (feature("DEBUG_TRACING")) traceBegin("qb.buildInsertMany");
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildInsertMany input`, { tableName, rowCount: rows.length, maxParams });
+  if (rows.length === 0) {
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildInsertMany output`, { batches: [] });
+    if (feature("DEBUG_TRACING")) traceEnd();
+    return [];
+  }
+  const ks = keys ?? Object.keys(rows[0]!);
+  const colCount = ks.length;
   const maxRowsPerStmt = Math.floor(maxParams / colCount);
   if (maxRowsPerStmt <= 0) {
     raise("TOO_MANY_COLUMNS", `foxdb: table "${tableName}" has too many columns for multi-value insert`);
   }
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildInsertMany batching`, { keys: ks, colCount, maxParams, maxRowsPerStmt });
+  const cols = colsSql ?? ks.map((k) => `"${k}"`).join(", ");
+  const vg = valueGroup ?? `(${ks.map(() => "?").join(", ")})`;
   const batches: Array<{ sql: string; params: SQLQueryBindings[] }> = [];
   for (let i = 0; i < rows.length; i += maxRowsPerStmt) {
     const batch = rows.slice(i, i + maxRowsPerStmt);
-    const cols = keys.map((k) => `"${k}"`).join(", ");
-    const valueGroups = batch.map(() => {
-      const ph = keys.map(() => "?").join(", ");
-      return `(${ph})`;
-    }).join(", ");
-    const params = batch.flatMap((row) => keys.map((k) => row[k] as SQLQueryBindings));
-    batches.push({ sql: `INSERT INTO "${tableName}" (${cols}) VALUES ${valueGroups}`, params });
+    const valueGroups = batch.map(() => vg).join(", ");
+    const params: SQLQueryBindings[] = keys
+      ? batch.flatMap((row) => ks.map((k) => row[k] as SQLQueryBindings))
+      : batch.flatMap((row) => ks.map((k) => toBinding(row[k])));
+    const sql = `INSERT INTO "${tableName}" (${cols}) VALUES ${valueGroups}`;
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildInsertMany batch`, { start: i, rowCount: batch.length, sql, paramCount: params.length });
+    batches.push({ sql, params });
   }
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildInsertMany output`, { batchCount: batches.length, batches });
+  if (feature("DEBUG_TRACING")) traceEnd();
   return batches;
 }
 
-// ─── UPSERT (INSERT OR REPLACE / ON CONFLICT DO UPDATE) ──────────────────────
+// --- UPSERT (INSERT OR REPLACE / ON CONFLICT DO UPDATE) ----------------------
 
 export function buildUpsert(
   tableName: string,
@@ -549,6 +742,7 @@ export function buildUpsert(
   conflictCols: string[],
   updateCols: string[]
 ): { sql: string; params: SQLQueryBindings[] } {
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpsert input`, { tableName, row, conflictCols, updateCols });
   const keys = Object.keys(row);
   const cols = keys.map((k) => `"${k}"`).join(", ");
   const placeholders = keys.map(() => "?").join(", ");
@@ -557,10 +751,12 @@ export function buildUpsert(
     .map((c) => `"${c}" = excluded."${c}"`)
     .join(", ");
 
-  return {
+  const result = {
     sql: `INSERT INTO "${tableName}" (${cols}) VALUES (${placeholders}) ON CONFLICT (${conflict}) DO UPDATE SET ${updates}`,
-    params: keys.map((k) => row[k] as SQLQueryBindings),
+    params: keys.map((k) => toBinding(row[k])),
   };
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpsert output`, { result });
+  return result;
 }
 
 export function buildUpsertMany(
@@ -570,7 +766,11 @@ export function buildUpsertMany(
   updateCols: string[],
   maxParams = 999
 ): Array<{ sql: string; params: SQLQueryBindings[] }> {
-  if (rows.length === 0) return [];
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpsertMany input`, { tableName, rowCount: rows.length, conflictCols, updateCols, maxParams });
+  if (rows.length === 0) {
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpsertMany output`, { batches: [] });
+    return [];
+  }
   const first = rows[0]!;
   const keys = Object.keys(first);
   const colCount = keys.length;
@@ -578,6 +778,7 @@ export function buildUpsertMany(
   if (maxRowsPerStmt <= 0) {
     raise("TOO_MANY_COLUMNS", `foxdb: table "${tableName}" has too many columns for multi-value upsert`);
   }
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpsertMany batching`, { keys, colCount, maxParams, maxRowsPerStmt });
   const conflict = conflictCols.map((c) => `"${c}"`).join(", ");
   const updates = updateCols
     .map((c) => `"${c}" = excluded."${c}"`)
@@ -590,16 +791,16 @@ export function buildUpsertMany(
       const ph = keys.map(() => "?").join(", ");
       return `(${ph})`;
     }).join(", ");
-    const params = batch.flatMap((row) => keys.map((k) => row[k] as SQLQueryBindings));
-    batches.push({
-      sql: `INSERT INTO "${tableName}" (${cols}) VALUES ${valueGroups} ON CONFLICT (${conflict}) DO UPDATE SET ${updates}`,
-      params,
-    });
+    const params = batch.flatMap((row) => keys.map((k) => toBinding(row[k])));
+    const sql = `INSERT INTO "${tableName}" (${cols}) VALUES ${valueGroups} ON CONFLICT (${conflict}) DO UPDATE SET ${updates}`;
+    if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpsertMany batch`, { start: i, rowCount: batch.length, sql, paramCount: params.length });
+    batches.push({ sql, params });
   }
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpsertMany output`, { batchCount: batches.length, batches });
   return batches;
 }
 
-// ─── UPDATE builder ───────────────────────────────────────────────────────────
+// --- UPDATE builder -----------------------------------------------------------
 
 export function buildUpdate<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
@@ -607,15 +808,20 @@ export function buildUpdate<T extends TSchema & { properties: Record<string, TSc
   pkValue: unknown,
   patch: Record<string, unknown>
 ): { sql: string; params: SQLQueryBindings[] } {
+  if (feature("DEBUG_TRACING")) traceBegin("qb.buildUpdate");
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpdate input`, { tableName, pk, pkValue, patch });
   const entries = Object.entries(patch).filter(([k]) => k !== pk);
   if (entries.length === 0) {
     raise("NO_COLUMNS_TO_UPDATE", "foxdb: no columns to update", { table: tableName });
   }
   const sets = entries.map(([k]) => `"${k}" = ?`).join(", ");
-  return {
+  const result = {
     sql: `UPDATE "${tableName}" SET ${sets} WHERE "${pk}" = ?`,
-    params: [...entries.map(([, v]) => v as SQLQueryBindings), pkValue as SQLQueryBindings],
+    params: [...entries.map(([, v]) => toBinding(v)), toBinding(pkValue)],
   };
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpdate output`, { result });
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return result;
 }
 
 export function buildUpdateWhere<T extends TSchema & { properties: Record<string, TSchema> }>(
@@ -625,28 +831,36 @@ export function buildUpdateWhere<T extends TSchema & { properties: Record<string
   softDeleteColumn: string | undefined,
   meta: TableMeta | undefined
 ): { sql: string; params: SQLQueryBindings[] } {
+  if (feature("DEBUG_TRACING")) traceBegin("qb.buildUpdateWhere");
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpdateWhere input`, { tableName, patch, where, softDeleteColumn, tableNameMeta: meta?.tableName });
   const entries = Object.entries(patch);
   if (entries.length === 0) {
     raise("NO_COLUMNS_TO_UPDATE", "foxdb: no columns to update", { table: tableName });
   }
   const sets = entries.map(([k]) => `"${k}" = ?`).join(", ");
   const { sql: whereSql, params: whereParams } = buildWhere(where, softDeleteColumn, meta);
-  return {
+  const result = {
     sql: `UPDATE "${tableName}" SET ${sets} ${whereSql}`.trim(),
-    params: [...entries.map(([, v]) => v as SQLQueryBindings), ...whereParams],
+    params: [...entries.map(([, v]) => toBinding(v)), ...whereParams],
   };
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildUpdateWhere output`, { result });
+  if (feature("DEBUG_TRACING")) traceEnd();
+  return result;
 }
 
-// ─── DELETE builder ───────────────────────────────────────────────────────────
+// --- DELETE builder -----------------------------------------------------------
 
 export function buildDelete<T extends TSchema & { properties: Record<string, TSchema> }>(
   tableName: string,
   where: WhereClause<T>,
   meta: TableMeta | undefined
 ): { sql: string; params: SQLQueryBindings[] } {
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildDelete input`, { tableName, where, tableNameMeta: meta?.tableName });
   const { sql: whereSql, params } = buildWhere(where, undefined, meta);
-  return {
+  const result = {
     sql: `DELETE FROM "${tableName}" ${whereSql}`.trim(),
     params,
   };
+  if (feature("DEBUG_SQL_BUILDING")) sqlDebug(`buildDelete output`, { result });
+  return result;
 }

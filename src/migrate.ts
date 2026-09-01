@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 import { BunDatabase } from "./database.ts";
 import type { Migration, MigrateOptions } from "./types.ts";
 
-// ─── Migration tracking table ─────────────────────────────────────────────────
+// --- Migration tracking table -------------------------------------------------
 
 function ensureMigrationsTable(db: BunDatabase): void {
   db.exec(`
@@ -33,7 +33,7 @@ function recordMigration(db: BunDatabase, name: string): void {
   stmt.run(name, Date.now());
 }
 
-// ─── Discovery ────────────────────────────────────────────────────────────────
+// --- Discovery ----------------------------------------------------------------
 
 function discoverMigrations(migrationsDir: string): Array<{ name: string; path: string }> {
   if (!existsSync(migrationsDir)) {
@@ -52,7 +52,7 @@ function discoverMigrations(migrationsDir: string): Array<{ name: string; path: 
   return files;
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// --- Public API ---------------------------------------------------------------
 
 export async function migrate(opts: MigrateOptions): Promise<void> {
   const db = new BunDatabase({ path: opts.path });

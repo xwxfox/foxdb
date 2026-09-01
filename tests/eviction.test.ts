@@ -35,7 +35,7 @@ describe("bounded tables", () => {
       orm.cache.insert({ id: `${i}`, data: "x", createdAt: Date.now(), lastAccessedAt: Date.now() });
     }
     // Eviction should have run automatically after each insert
-    expect(orm.cache.count()).toBeLessThanOrEqual(5);
+    expect(orm.cache.O_count()).toBeLessThanOrEqual(5);
   });
 
   test("eviction does not delete all rows when count < maxRows", () => {
@@ -53,10 +53,10 @@ describe("bounded tables", () => {
     for (let i = 1; i <= 5; i++) {
       orm2.items.insert({ id: `${i}`, name: `item-${i}` });
     }
-    expect(orm2.items.count()).toBe(5);
+    expect(orm2.items.O_count()).toBe(5);
     // Trigger eviction by inserting one more
     orm2.items.insert({ id: "6", name: "item-6" });
-    expect(orm2.items.count()).toBe(6); // Should still be 6, not 0
+    expect(orm2.items.O_count()).toBe(6); // Should still be 6, not 0
     orm2._close();
   });
 });

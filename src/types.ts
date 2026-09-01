@@ -1,5 +1,5 @@
 /**
- * bunorm/src/types.ts
+ * foxdb/src/types.ts
  * Core type utilities - all ORM-level TypeScript types live here.
  * Zero runtime cost; pure compile-time machinery.
  */
@@ -10,6 +10,8 @@ import type {
   TSchema,
   TProperties,
   TOptional,
+  TString,
+  TLiteral,
   Static,
 } from "typebox";
 import type { ColumnRef, TScalarSchema } from "./columns.ts";
@@ -17,29 +19,29 @@ import type { TypedRelation } from "./typed-relation.ts";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-// ─── TypeBox → SQLite type mapping (compile-time) ──────────────────────────────
+// --- TypeBox → SQLite type mapping (compile-time) ------------------------------
 
 export type SqliteType = "TEXT" | "INTEGER" | "REAL" | "BLOB";
 
-type IsStringSchema<S> = S extends { type: "string" } ? true : false;
+export type IsStringSchema<S> = S extends { type: "string" } ? true : false;
 type IsIntegerSchema<S> = S extends { type: "integer" } ? true : false;
 type IsNumberSchema<S> = S extends { type: "number" } ? true : false;
 type IsBooleanSchema<S> = S extends { type: "boolean" } ? true : false;
 type IsLiteralSchema<S> = S extends { const: string | number | boolean } ? true : false;
 
-type InferSqliteType<S> = 
+export type InferSqliteType<S> =
   IsIntegerSchema<S> extends true ? "INTEGER"
   : IsNumberSchema<S> extends true ? "REAL"
   : IsBooleanSchema<S> extends true ? "INTEGER"
-  : IsLiteralSchema<S> extends true ? S extends { const: infer V } 
-      ? V extends number ? (number extends V ? "REAL" : "INTEGER")
-      : V extends boolean ? "INTEGER" 
-      : "TEXT"
-      : "TEXT"
+  : IsLiteralSchema<S> extends true ? S extends { const: infer V }
+  ? V extends number ? (number extends V ? "REAL" : "INTEGER")
+  : V extends boolean ? "INTEGER"
+  : "TEXT"
+  : "TEXT"
   : "TEXT";
 
-type SchemaForKey<C, K extends string> = K extends keyof C ? C[K] : never;
-type ValueTypeForKey<C, K extends string> = SchemaForKey<C, K> extends TSchema ? Static<SchemaForKey<C, K>> : never;
+export type SchemaForKey<C, K extends string> = K extends keyof C ? C[K] : never;
+export type ValueTypeForKey<C, K extends string> = SchemaForKey<C, K> extends TSchema ? Static<SchemaForKey<C, K>> : never;
 
 export type DBBinary = Uint8Array;
 
@@ -51,7 +53,7 @@ export type DBRow = Record<string, DBValue | undefined>;
 /** @internal */
 export type UnwrapOptional<T> = T extends TOptional<infer U> ? U : T;
 
-// ─── Select-shape helpers ────────────────────────────────────────────────────
+// --- Select-shape helpers ----------------------------------------------------
 
 /** @internal */
 export type UnionToIntersection<U> = (U extends any ? (x: U) => void : never) extends (x: infer I) => void ? I : never;
@@ -76,7 +78,7 @@ export type MergePath<O, P extends string> = P extends `${infer K}.${infer Rest}
 export type SelectShape<T extends TSchema & { properties: Record<string, TSchema> }, S extends readonly string[]> =
   UnionToIntersection<S[number] extends infer P ? P extends string ? MergePath<Infer<T>, P> : never : never>;
 
-// ─── Primitive column types ──────────────────────────────────────────────────
+// --- Primitive column types --------------------------------------------------
 
 /**
  * scalar values sqlite can store natively
@@ -84,7 +86,7 @@ export type SelectShape<T extends TSchema & { properties: Record<string, TSchema
  */
 export type SqliteScalar = string | number | boolean | null | bigint;
 
-// ─── Schema introspection helpers ────────────────────────────────────────────
+// --- Schema introspection helpers --------------------------------------------
 
 /**
  * @internal
@@ -247,7 +249,7 @@ export type PathValue<T extends TSchema & { properties: Record<string, TSchema> 
   ? Static<T["properties"][P]>
   : never;
 
-// ─── Static inference shortcuts ──────────────────────────────────────────────
+// --- Static inference shortcuts ----------------------------------------------
 
 /**
  * the typescript type that matches a typebox schema
@@ -287,7 +289,7 @@ export type SubTableItemKeys<
   : never
   : never;
 
-// ─── Filter / Where types ─────────────────────────────────────────────────────
+// --- Filter / Where types -----------------------------------------------------
 
 /** @category Query Types */
 export type ScalarFilter<V> = unknown extends V
@@ -418,7 +420,7 @@ export type WhereClause<T extends TSchema & {
     _raw?: { sql: string; params: unknown[] };
   };
 
-// ─── OrderBy ─────────────────────────────────────────────────────────────────
+// --- OrderBy -----------------------------------------------------------------
 
 /**
  * sort direction for queries
@@ -429,7 +431,7 @@ export type OrderByClause<T extends TSchema & { properties: Record<string, TSche
   direction?: "ASC" | "DESC";
 };
 
-// ─── Pagination ───────────────────────────────────────────────────────────────
+// --- Pagination ---------------------------------------------------------------
 
 /**
  * @internal
@@ -455,7 +457,7 @@ export interface CursorPageResult<T> {
   prevCursor: Cursor | null;
 }
 
-// ─── Query options ────────────────────────────────────────────────────────────
+// --- Query options ------------------------------------------------------------
 
 /**
  * Options for `findMany`, `findPage`, and `findOne`.
@@ -487,6 +489,54 @@ export interface CursorPageResult<T> {
 export type SelectableKeys<T extends TSchema & { properties: Record<string, TSchema> }> =
   ScalarKeys<T> | ObjectKeys<T> | PrimitiveArrayKeys<T> | JsonPath<T>;
 
+// --- Chain Filter Builder types -----------------------------------------------
+
+export type FilterableFields<T extends TSchema & { properties: Record<string, TSchema> }> =
+  ScalarKeys<T> | ObjectKeys<T> | ScalarJsonPath<T> | SubTableScalarPath<T>;
+
+/**
+ * Filterable fields excluding sub-table paths.
+ * Used when no sub-tables have been included via .include().
+ * @category Query Types
+ */
+export type FilterableFieldsBase<T extends TSchema & { properties: Record<string, TSchema> }> =
+  ScalarKeys<T> | ObjectKeys<T> | ScalarJsonPath<T>;
+
+/**
+ * Filterable fields that include ONLY sub-table paths for the specified tables.
+ * @internal
+ */
+export type IncludedSubTablePaths<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  I extends string
+> = Extract<SubTableScalarPath<T>, `${I}.${string}`>;
+
+export type FilterableForInclude<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  I extends string | undefined
+> = [I] extends [never] ? FilterableFieldsBase<T>
+  : [I] extends [undefined] ? FilterableFieldsBase<T>
+  : FilterableFieldsBase<T> | IncludedSubTablePaths<T, I & string>;
+
+export type FieldType<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  P extends FilterableFields<T>
+> = PathValue<T, P>;
+
+export type ArrayFilterableFields<T extends TSchema & { properties: Record<string, TSchema> }> =
+  PrimitiveArrayKeys<T>;
+
+export type ArrayItemType<
+  T extends TSchema & { properties: Record<string, TSchema> },
+  P extends ArrayFilterableFields<T>
+> = UnwrapOptional<T["properties"][P]> extends TArray<infer Item> ? Static<Item> : never;
+
+export type OrderableFields<T extends TSchema & { properties: Record<string, TSchema> }> =
+  ScalarKeys<T> | ScalarJsonPath<T>;
+
+export type DistinctableFields<T extends TSchema & { properties: Record<string, TSchema> }> =
+  ScalarKeys<T> | ScalarJsonPath<T>;
+
 export interface FindOptions<T extends TSchema & { properties: Record<string, TSchema> }> extends PaginationOptions {
   where?: WhereClause<T>;
   orderBy?: OrderByClause<T> | OrderByClause<T>[];
@@ -497,7 +547,7 @@ export interface FindOptions<T extends TSchema & { properties: Record<string, TS
   distinctOn?: (ScalarKeys<T> | ScalarJsonPath<T>)[];
 }
 
-// ─── Insert / Update ──────────────────────────────────────────────────────────
+// --- Insert / Update ----------------------------------------------------------
 
 /**
  * full record to insert
@@ -515,7 +565,7 @@ export type UpdateData<T extends TSchema & { properties: Record<string, TSchema>
 > &
   Partial<Omit<Infer<T>, PK>>;
 
-// ─── Index definition ────────────────────────────────────────────────────────
+// --- Index definition --------------------------------------------------------
 
 /**
  * index on one or more columns
@@ -529,7 +579,7 @@ export interface IndexDefinition {
   include?: Array<ColumnRef<string, TScalarSchema> | { name: string }>;
 }
 
-// ─── Timestamp types ─────────────────────────────────────────────────────────
+// --- Timestamp types ---------------------------------------------------------
 
 /**
  * timestamp configuration for a table
@@ -547,7 +597,7 @@ export type TimestampShape<T extends TimestampConfig> = true extends T
   ? (C extends string ? { [K in C]: number } : {}) & (U extends string ? { [K in U]: number } : {})
   : {};
 
-// ─── Entity helper ───────────────────────────────────────────────────────────
+// --- Entity helper -----------------------------------------------------------
 
 /**
  * A database row with optional timestamps and materialized relations.
@@ -575,12 +625,12 @@ export type Entity<T, Mat = never, TS = {}> = [Mat] extends [never]
 
 export type ProjectedEntity<
   T extends TSchema & { properties: Record<string, TSchema> },
-  Mat = never,
+  _Mat = never,
   TS = {},
   K extends ScalarKeys<T> = ScalarKeys<T>
 > = Pick<Infer<T>, K> & TS;
 
-// ─── Table config (what users pass per table in `createORM`) ─────────────────
+// --- Table config (what users pass per table in `createORM`) -----------------
 
 /**
  * table descriptor passed to createORM
@@ -602,7 +652,52 @@ export interface SoftDeleteConfig {
   column: string;
 }
 
-// ─── Generated Columns (object-based config) ────────────────────────────────────
+// --- Full-text search (FTS5) config ------------------------------------------
+
+/**
+ * Full-text search configuration for a table.
+ * - `true` indexes every TEXT column.
+ * - `{ columns }` indexes an explicit, type-checked column list.
+ * @category Schema
+ */
+export type FTSConfig =
+  | true
+  | {
+      /** Columns to index. Omit to index all TEXT columns. */
+      columns?: readonly ColumnRef<string, TScalarSchema>[];
+      /** FTS5 tokenizer directive, e.g. "porter unicode61", "trigram". Default: "unicode61". */
+      tokenizer?: string;
+      /** FTS5 prefix-index sizes, e.g. [2, 3]. */
+      prefix?: readonly number[];
+    };
+
+/** True when a table has FTS enabled. @internal */
+export type FTSEnabled<F> = [F] extends [undefined] ? false : [F] extends [never] ? false : true;
+
+/** Union of flattened TEXT column names (top-level + nested `a__b`). @internal */
+export type FTSAllTextFields<T extends TSchema & { properties: Record<string, TSchema> }> = {
+  [K in keyof import("./columns.ts").ColumnRefs<T>]: import("./columns.ts").ColumnRefs<T>[K] extends ColumnRef<infer N, infer S>
+    ? S extends TString ? N
+    : S extends TLiteral<string> ? N
+    : never
+    : never;
+}[keyof import("./columns.ts").ColumnRefs<T>];
+
+/** Names extracted from an explicit `{ columns }` FTS config. @internal */
+export type FTSConfiguredFields<F> =
+  F extends { columns: readonly (infer C)[] }
+    ? C extends ColumnRef<infer N, TScalarSchema> ? N : never
+    : never;
+
+/** The searchable field-name union for a table given its FTS config. @internal */
+export type FTSFields<T extends TSchema & { properties: Record<string, TSchema> }, F> =
+  [F] extends [undefined] ? never
+  : [F] extends [false] ? never
+  : F extends { columns: readonly ColumnRef<string, TScalarSchema>[] }
+    ? FTSConfiguredFields<F>
+    : FTSAllTextFields<T>;
+
+// --- Generated Columns (object-based config) ------------------------------------
 
 export type GeneratedColumnConfig = {
   [name: string]: {
@@ -619,7 +714,7 @@ type GeneratedColumnEntries<C extends GeneratedColumnConfig> = {
   };
 }[keyof C & string];
 
-export type GeneratedColumnsTuple<C extends GeneratedColumnConfig> = 
+export type GeneratedColumnsTuple<C extends GeneratedColumnConfig> =
   readonly GeneratedColumnEntries<C>[];
 
 type GeneratedColumnValues<C extends GeneratedColumnConfig> = {
@@ -637,21 +732,23 @@ export type QuerySchema<
 > = [G] extends [undefined]
   ? T
   : [G] extends [GeneratedColumnConfig]
-    ? AugmentSchema<T, G>
-    : T;
+  ? AugmentSchema<T, G>
+  : T;
 
 export type AnyTableConfig = TableConfig<
   TSchema & { properties: Record<string, TSchema> },
   string,
   TimestampConfig,
-  GeneratedColumnConfig | undefined
+  GeneratedColumnConfig | undefined,
+  FTSConfig | undefined
 >;
 
 export interface TableConfig<
   T extends TSchema & { properties: Record<string, TSchema> } = TSchema & { properties: Record<string, TSchema> },
   PK extends string = string,
   TS extends TimestampConfig = undefined,
-  G extends GeneratedColumnConfig | undefined = undefined
+  G extends GeneratedColumnConfig | undefined = undefined,
+  F extends FTSConfig | undefined = undefined
 > {
   schema: T;
   primaryKey: ColumnRef<PK>;
@@ -662,9 +759,12 @@ export interface TableConfig<
   compression?: CompressionConfig;
   softDelete?: SoftDeleteConfig;
   generated?: G;
+  fts?: F;
+  /** Auto-index TEXT columns on sub-tables. Defaults to true. Set false to disable. */
+  autoIndex?: boolean;
 }
 
-// ─── Meta accessors ──────────────────────────────────────────────────────────
+// --- Meta accessors ----------------------------------------------------------
 
 /**
  * read-only metadata about the current database schema
@@ -678,7 +778,7 @@ export interface MetaAccessors {
   version: string | null;
 }
 
-// ─── Relations ────────────────────────────────────────────────────────────────
+// --- Relations ----------------------------------------------------------------
 
 /**
  * @internal
@@ -698,7 +798,7 @@ export interface BuiltRelation {
  * @category Relations
  */
 export interface RelationEntry<
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Owner extends keyof Tables,
   Target extends keyof Tables
 > {
@@ -712,7 +812,7 @@ export interface RelationEntry<
  * @category Relations
  */
 export type RelationsConfig<
-  Tables extends Record<string, TableConfig<any, any, any, any>>
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>
 > = {
     [K in keyof Tables & string]?: Array<
       {
@@ -725,7 +825,7 @@ export type RelationsConfig<
     >;
   };
 
-// ─── Materialized types ───────────────────────────────────────────────────────
+// --- Materialized types -------------------------------------------------------
 
 /**
  * @internal
@@ -748,7 +848,7 @@ export type ScalarMergeNames<
  * @category Relations
  */
 export type ScalarMergeType<
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[],
   Owner extends string,
   Name extends string
@@ -766,7 +866,7 @@ export type ScalarMergeType<
  * @category Relations
  */
 export type ScalarMerge<
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[],
   Owner extends string
 > = {
@@ -800,7 +900,7 @@ export type SubMergeNames<
  * @category Relations
  */
 export type SubMergeType<
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[],
   Owner extends string,
   Sub extends string,
@@ -819,7 +919,7 @@ export type SubMergeType<
  * @category Relations
  */
 export type SubMerge<
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[],
   Owner extends string,
   Sub extends string
@@ -851,7 +951,7 @@ export type SubMerge<
  */
 export type Materialized<
   T extends TSchema & { properties: Record<string, TSchema> },
-  Tables extends Record<string, TableConfig<any, any, any, any>>,
+  Tables extends Record<string, TableConfig<any, any, any, any, any>>,
   Rels extends readonly TypedRelation[],
   Owner extends string
 > = {
@@ -862,7 +962,7 @@ export type Materialized<
   : Infer<T>[K];
 } & ScalarMerge<Tables, Rels, Owner>;
 
-// ─── Result types ─────────────────────────────────────────────────────────────
+// --- Result types -------------------------------------------------------------
 
 /**
  * paginated query result
@@ -875,7 +975,7 @@ export interface PageResult<T> {
   offset: number;
 }
 
-// ─── Upsert ───────────────────────────────────────────────────────────────────
+// --- Upsert -------------------------------------------------------------------
 
 /**
  * insert or update on conflict
@@ -888,7 +988,7 @@ export interface UpsertOptions<T extends TSchema & { properties: Record<string, 
   update?: Array<ScalarKeys<T>>;
 }
 
-// ─── UpdateWhere ──────────────────────────────────────────────────────────────
+// --- UpdateWhere --------------------------------------------------------------
 
 /**
  * bulk conditional update
@@ -903,7 +1003,7 @@ export interface UpdateWhereOptions<
   includeDeleted?: boolean;
 }
 
-// ─── UpsertMany ───────────────────────────────────────────────────────────────
+// --- UpsertMany ---------------------------------------------------------------
 
 /**
  * bulk upsert with conflict resolution
@@ -919,7 +1019,7 @@ export interface UpsertManyOptions<
   update?: Array<ScalarKeys<T>>;
 }
 
-// ─── Migration types ──────────────────────────────────────────────────────────
+// --- Migration types ----------------------------------------------------------
 
 /**
  * a single migration step
@@ -980,7 +1080,7 @@ export type SyncPolicy =
   | "auto"
   | ((diff: SchemaDiff, db: import("./database.ts").BunDatabase) => boolean | void);
 
-// ─── Window Functions ─────────────────────────────────────────────────────────
+// --- Window Functions ---------------------------------------------------------
 
 /** @category Query Types */
 export type WindowFunction<T extends TSchema & { properties: Record<string, TSchema> }> =
@@ -1017,7 +1117,7 @@ export type WindowResult<
   W extends Record<string, WindowFunction<T>>
 > = Array<{ [K in keyof W]: WindowFunctionResult<T, W[K]> }>;
 
-// ─── Aggregation ──────────────────────────────────────────────────────────────
+// --- Aggregation --------------------------------------------------------------
 
 /** @category Query Types */
 export type AggregationOp<T extends TSchema & { properties: Record<string, TSchema> } = TSchema & { properties: Record<string, TSchema> }> =
@@ -1069,7 +1169,7 @@ export type AggregateResult<
   G extends readonly string[] | undefined = undefined
 > = Array<{ [K in keyof A]: AggregationOpResult<T, A[K]> } & (G extends readonly string[] ? { [K in G[number]]: PathValue<T, K> } : {})>;
 
-// ─── Query Metrics ────────────────────────────────────────────────────────────
+// --- Query Metrics ------------------------------------------------------------
 
 /** @category Observability */
 export interface QueryMetrics {
@@ -1085,7 +1185,7 @@ export interface QueryMetricsHook {
   onQuery: (meta: QueryMetrics) => void;
 }
 
-// ─── Event types ──────────────────────────────────────────────────────────────
+// --- Event types --------------------------------------------------------------
 
 /**
  * specific operations that can be listened to per table
@@ -1141,7 +1241,7 @@ export interface TableEventPayload<
   timestamp: number;
 }
 
-// ─── Lifecycle config primitives ──────────────────────────────────────────────
+// --- Lifecycle config primitives ----------------------------------------------
 
 /**
  * how to handle errors

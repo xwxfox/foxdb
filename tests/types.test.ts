@@ -16,7 +16,7 @@ const ItemSchema = Object({
   stock: Integer(),
 });
 
-// ─── Valid config ─────────────────────────────────────────────────────────────
+// --- Valid config -------------------------------------------------------------
 
 const valid = table(ItemSchema, (s) => ({
   primaryKey: s.sku,
@@ -25,18 +25,18 @@ const valid = table(ItemSchema, (s) => ({
 
 void valid;
 
-// ─── Invalid primaryKey should error at property access ───────────────────────
+// --- Invalid primaryKey should error at property access -----------------------
 
 const cols = createColumnProxy(ItemSchema);
 // @ts-expect-error - "nonExistent" is not a scalar column
 void cols.nonExistent;
 
-// ─── Invalid index column should error at property access ─────────────────────
+// --- Invalid index column should error at property access ---------------------
 
 // @ts-expect-error - "nonExistent" is not a scalar column
 void cols.nonExistent;
 
-// ─── Sub-table in index should error ──────────────────────────────────────────
+// --- Sub-table in index should error ------------------------------------------
 
 const WithSub = Object({
   id: String(),
@@ -47,18 +47,18 @@ const subCols = createColumnProxy(WithSub);
 // @ts-expect-error - tags is an array (sub-table), not a scalar
 void subCols.tags;
 
-  // ─── select projection narrows return type ────────────────────────────────────
+// --- select projection narrows return type ------------------------------------
 
 function _compileTimeChecks() {
   const UserSchema = Object({ id: String(), name: String(), age: Number() });
   const users = table(UserSchema, (s) => ({ primaryKey: s.id }));
   const orm = createORM({ tables: { users } });
 
-  const projected = orm.users.findMany({ select: ["id"] });
-  // @ts-expect-error — name was not selected
+  const projected = orm.users.O_findMany({ select: ["id"] });
+  // @ts-expect-error - name was not selected
   void projected[0].name;
 
-  // ─── select + include preserves sub-table types ───────────────────────────────
+  // --- select + include preserves sub-table types -------------------------------
 
   const OrderSchema = Object({
     id: String(),
@@ -68,34 +68,34 @@ function _compileTimeChecks() {
   const orders = table(OrderSchema, (s) => ({ primaryKey: s.id }));
   const orderOrm = createORM({ tables: { orders } });
 
-  const withItems = orderOrm.orders.findMany({ select: ["id", "total"], include: ["lineItems"] });
+  const withItems = orderOrm.orders.O_findMany({ select: ["id", "total"], include: ["lineItems"] });
   const firstOrder = withItems[0]!;
   const _id: string = firstOrder.id;
   const _total: number = firstOrder.total;
   const _sku: string = firstOrder.lineItems[0]!.sku;
-  // @ts-expect-error — name is not a scalar column on OrderSchema
+  // @ts-expect-error - name is not a scalar column on OrderSchema
   void firstOrder.name;
-  // @ts-expect-error — lineItems[0].wrong is not a property
+  // @ts-expect-error - lineItems[0].wrong is not a property
   void firstOrder.lineItems[0]!.wrong;
 
   orderOrm._close();
 
-  // ─── iterate yields entities ──────────────────────────────────────────────────
+  // --- iterate yields entities --------------------------------------------------
 
-  for (const u of orm.users.iterate()) {
+  for (const u of orm.users.O_iterate()) {
     const _id: string = u.id;
     void _id;
   }
 
-  // ─── aggregate returns dynamic shape ──────────────────────────────────────────
+  // --- aggregate returns dynamic shape ------------------------------------------
 
-  const agg = orm.users.aggregate({ aggregations: { total: { sum: "age" } } });
-  // @ts-expect-error — wrong aggregation alias
+  const agg = orm.users.O_aggregate({ aggregations: { total: { sum: "age" } } });
+  // @ts-expect-error - wrong aggregation alias
   void agg[0].wrong;
 
   orm._close();
 
-  // ─── JSON path dotted paths are accepted in where clauses ─────────────────────
+  // --- JSON path dotted paths are accepted in where clauses ---------------------
 
   const NestedSchema = Object({
     id: Number(),
@@ -106,19 +106,19 @@ function _compileTimeChecks() {
   const nestedOrm = createORM({ tables: { nested } });
 
   // Dotted paths should be accepted
-  nestedOrm.nested.findMany({ where: { "pricing.total": { gt: 100 } } });
-  nestedOrm.nested.findMany({ where: { "status.group": { eq: "active" } } });
-  nestedOrm.nested.findMany({ where: { "pricing.currency": { in: ["DKK", "EUR"] } } });
+  nestedOrm.nested.O_findMany({ where: { "pricing.total": { gt: 100 } } });
+  nestedOrm.nested.O_findMany({ where: { "status.group": { eq: "active" } } });
+  nestedOrm.nested.O_findMany({ where: { "pricing.currency": { in: ["DKK", "EUR"] } } });
 
   // Direct nested object comparison should still work
-  nestedOrm.nested.findMany({ where: { pricing: { eq: { total: 100, currency: "DKK" } } } });
+  nestedOrm.nested.O_findMany({ where: { pricing: { eq: { total: 100, currency: "DKK" } } } });
 
-  // @ts-expect-error — "pricing.nonexistent" is not a valid dotted path
-  void nestedOrm.nested.findMany({ where: { "pricing.nonexistent": { gt: 100 } } });
+  // @ts-expect-error - "pricing.nonexistent" is not a valid dotted path
+  void nestedOrm.nested.O_findMany({ where: { "pricing.nonexistent": { gt: 100 } } });
 
   nestedOrm._close();
 
-  // ─── Depth-2 JSON path dotted paths are accepted in where clauses ─────────────
+  // --- Depth-2 JSON path dotted paths are accepted in where clauses -------------
 
   const Depth2Schema = Object({
     id: Number(),
@@ -130,15 +130,15 @@ function _compileTimeChecks() {
   const depth2Orm = createORM({ tables: { depth2 } });
 
   // Valid depth-2 dotted paths should be accepted
-  depth2Orm.depth2.findMany({ where: { "address.city.zip": { eq: "12345" } } });
-  depth2Orm.depth2.findMany({ where: { "address.city.name": { like: "%York%" } } });
-  depth2Orm.depth2.findMany({ where: { "address.city.zip": { in: ["12345", "67890"] } } });
+  depth2Orm.depth2.O_findMany({ where: { "address.city.zip": { eq: "12345" } } });
+  depth2Orm.depth2.O_findMany({ where: { "address.city.name": { like: "%York%" } } });
+  depth2Orm.depth2.O_findMany({ where: { "address.city.zip": { in: ["12345", "67890"] } } });
 
-  // @ts-expect-error — "address.city.nonexistent" is not a valid depth-2 dotted path
-  void depth2Orm.depth2.findMany({ where: { "address.city.nonexistent": { eq: "x" } } });
+  // @ts-expect-error - "address.city.nonexistent" is not a valid depth-2 dotted path
+  void depth2Orm.depth2.O_findMany({ where: { "address.city.nonexistent": { eq: "x" } } });
 
-  // @ts-expect-error — "address.nonexistent.zip" is not a valid depth-2 dotted path
-  void depth2Orm.depth2.findMany({ where: { "address.nonexistent.zip": { eq: "x" } } });
+  // @ts-expect-error - "address.nonexistent.zip" is not a valid depth-2 dotted path
+  void depth2Orm.depth2.O_findMany({ where: { "address.nonexistent.zip": { eq: "x" } } });
 
   depth2Orm._close();
 }

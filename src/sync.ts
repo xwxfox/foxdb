@@ -8,7 +8,7 @@ import { BunDatabase } from "./database.ts";
 import type { SchemaDiff, SchemaChange, SyncPolicy } from "./types.ts";
 import type { DesiredTable } from "./diff.ts";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 function findDesiredTable(desired: DesiredTable[], name: string): DesiredTable | undefined {
   return desired.find((d) => d.name === name);
@@ -85,7 +85,7 @@ function createSubTable(
   });
 }
 
-// ─── Apply safe changes ───────────────────────────────────────────────────────
+// --- Apply safe changes -------------------------------------------------------
 
 function applySafeChanges(diff: SchemaDiff, db: BunDatabase, desired: DesiredTable[]): void {
   for (const change of diff.safe) {
@@ -128,7 +128,7 @@ function applySafeChanges(diff: SchemaDiff, db: BunDatabase, desired: DesiredTab
   }
 }
 
-// ─── Policy handlers ──────────────────────────────────────────────────────────
+// --- Policy handlers ----------------------------------------------------------
 
 function handlePolicy(
   diff: SchemaDiff,
@@ -172,7 +172,7 @@ function handlePolicy(
   return true;
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// --- Public API ---------------------------------------------------------------
 
 /** @category Migration */
 export function applySync(

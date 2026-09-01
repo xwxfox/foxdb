@@ -18,26 +18,37 @@
  * ```
  */
 
-// ─── Setup ────────────────────────────────────────────────────────────────────
+// --- Setup --------------------------------------------------------------------
 
 /** @category Setup */
 export { createORM } from "./orm.ts";
 /** @category Setup */
 export type { foxdb, CreateORMOptions, CreateORMBaseOptions } from "./orm.ts";
 
-// ─── Repositories ─────────────────────────────────────────────────────────────
+// --- Repositories -------------------------------------------------------------
 
 /** @category Repositories */
 export { Repository } from "./repository.ts";
 
-// ─── Database ─────────────────────────────────────────────────────────────────
+// --- Chain Query API ----------------------------------------------------------
+
+/** @category Query Building */
+export { FilterBuilder, AggregateBuilder, buildWhereFromNodes } from "./filter-builder.ts";
+/** @category Query Building */
+export type {
+  ConditionNode,
+  InternalBuilderState,
+  AggregateBuilderState,
+} from "./filter-builder.ts";
+
+// --- Database -----------------------------------------------------------------
 
 /** @category Database */
 export { BunDatabase } from "./database.ts";
 /** @category Database */
 export type { BunStatement, DatabaseOptions } from "./database.ts";
 
-// ─── Schema ───────────────────────────────────────────────────────────────────
+// --- Schema -------------------------------------------------------------------
 
 /** @category Schema */
 export { table } from "./table.ts";
@@ -49,7 +60,7 @@ export type { GeneratedColumnConfig } from "./types.ts";
 /** @category Schema */
 export type { ColumnRef, ColumnRefs, TScalarSchema } from "./columns.ts";
 
-// ─── Query Types ──────────────────────────────────────────────────────────────
+// --- Query Types --------------------------------------------------------------
 
 /** @category Query Types */
 export type {
@@ -69,9 +80,15 @@ export type {
   ScalarFilter,
   AggregateOptions,
   AggregationOp,
+  FilterableFields,
+  FieldType,
+  ArrayFilterableFields,
+  ArrayItemType,
+  OrderableFields,
+  DistinctableFields,
 } from "./types.ts";
 
-// ─── Relations ────────────────────────────────────────────────────────────────
+// --- Relations ----------------------------------------------------------------
 
 /** @category Relations */
 export { createRelationBuilder } from "./relations.ts";
@@ -94,7 +111,7 @@ export type {
   SubTableScalarPath,
 } from "./types.ts";
 
-// ─── Events ───────────────────────────────────────────────────────────────────
+// --- Events -------------------------------------------------------------------
 
 /** @category Events */
 export { EventBus } from "./events.ts";
@@ -103,26 +120,26 @@ export type { LifecycleEventMap, ORMEvents, Listener } from "./events.ts";
 /** @category Events */
 export type { TableOperation, BroadOperation, TableEventPayload, TableEventOperation } from "./types.ts";
 
-// ─── Observability ────────────────────────────────────────────────────────────
+// --- Observability ------------------------------------------------------------
 
 /** @category Observability */
 export type { QueryMetrics, QueryMetricsHook } from "./types.ts";
 
-// ─── Batch Writer ─────────────────────────────────────────────────────────────
+// --- Batch Writer -------------------------------------------------------------
 
 /** @category Writing */
 export { BatchWriter } from "./batch-writer.ts";
 /** @category Writing */
 export type { BatchWriterOptions } from "./batch-writer.ts";
 
-// ─── Lifecycle ────────────────────────────────────────────────────────────────
+// --- Lifecycle ----------------------------------------------------------------
 
 /** @category Lifecycle */
 export { LifecycleManager } from "./lifecycle.ts";
 /** @category Lifecycle */
 export type { ORMContext, LifecycleHook } from "./lifecycle.ts";
 
-// ─── Migration ────────────────────────────────────────────────────────────────
+// --- Migration ----------------------------------------------------------------
 
 /** @category Migration */
 export { migrate } from "./migrate.ts";
@@ -131,7 +148,7 @@ export { createMigration } from "./migration-template.ts";
 /** @category Migration */
 export type { Migration, MigrateOptions, SchemaDiff, SchemaChange, SyncPolicy } from "./types.ts";
 
-// ─── Errors ───────────────────────────────────────────────────────────────────
+// --- Errors -------------------------------------------------------------------
 
 /** @category Errors */
 export { ORMError, raise, withTrace } from "./errors.ts";
@@ -140,7 +157,7 @@ export type { ORMErrorContext, TraceEntry, ErrorPolicy } from "./errors.ts";
 /** @category Setup */
 export type { UnlinkPolicy } from "./types.ts";
 
-// ─── Introspection ────────────────────────────────────────────────────────────
+// --- Introspection ------------------------------------------------------------
 
 /** @category Advanced */
 export { introspectTable, buildCreateTableSQL } from "./schema.ts";
@@ -172,7 +189,16 @@ export type { DesiredTable } from "./diff.ts";
 /** @category Advanced */
 export { applySync } from "./sync.ts";
 
-// ─── Internal helpers (not for public use) ────────────────────────────────────
+// --- Full-text search ---------------------------------------------------------
+
+/** @category Query Building */
+export { FtsSearchBuilder, ftsTableName, resolveFtsColumns, buildFtsSearchSql } from "./fts.ts";
+/** @category Query Building */
+export type { FtsResult, FtsSearchState, FtsSnippetSpec, FtsHighlightSpec } from "./fts.ts";
+/** @category Schema */
+export type { FTSConfig, FTSFields, FTSEnabled } from "./types.ts";
+
+// --- Internal helpers (not for public use) ------------------------------------
 
 /** @category Advanced */
 export type {

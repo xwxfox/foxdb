@@ -9,9 +9,9 @@ import type { TableDescriptor } from "./table.ts";
 /** @category Events */
 export type Listener = (payload: unknown) => void;
 
-// ─── Typed event map ──────────────────────────────────────────────────────────
+// --- Typed event map ----------------------------------------------------------
 
-// ─── Lifecycle event payloads (concrete, no remapping) ───────────────────────
+// --- Lifecycle event payloads (concrete, no remapping) -----------------------
 
 /**
  * lifecycle events emitted by the orm
@@ -47,14 +47,14 @@ export type ExtractEventPayload<
   ? LifecycleEventMap[K]
   : never;
 
-// ─── Public events interface ──────────────────────────────────────────────────
+// --- Public events interface --------------------------------------------------
 
 /**
  * typed event listener api
  * @category Events
  */
 export interface ORMEvents<
-  Tables extends Record<string, TableDescriptor<any, any, any, any>>
+  Tables extends Record<string, TableDescriptor<any, any, any, any, any>>
 > {
   /** listen to lifecycle events (start, ready, shutdown, exit, fail) */
   on<K extends (keyof LifecycleEventMap) & string>(

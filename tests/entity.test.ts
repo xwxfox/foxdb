@@ -204,8 +204,8 @@ const TimestampSaleSchema = Object({
   status: String(),
   total: Number(),
   lineItems: Array(LineItemSchema),
-  createdAt: Optional(Number()),
-  updatedAt: Optional(Number()),
+  // createdAt: Optional(Number()),
+  // updatedAt: Optional(Number()),
 });
 
 function makeTimestampORM() {

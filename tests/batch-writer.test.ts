@@ -40,10 +40,10 @@ describe("BatchWriter", () => {
     writer.insert({ id: "u2", name: "bob", age: 25 });
 
     // Should not be flushed yet
-    expect(orm.users.count()).toBe(0);
+    expect(orm.users.O_count()).toBe(0);
 
     writer.close();
-    expect(orm.users.count()).toBe(2);
+    expect(orm.users.O_count()).toBe(2);
 
     const u1 = orm.users.findById("u1");
     expect(u1).not.toBeNull();
@@ -54,10 +54,10 @@ describe("BatchWriter", () => {
     const writer = orm.users.createBatchWriter({ maxBuffer: 3 });
     writer.insert({ id: "u1", name: "a", age: 1 });
     writer.insert({ id: "u2", name: "b", age: 2 });
-    expect(orm.users.count()).toBe(0);
+    expect(orm.users.O_count()).toBe(0);
 
     writer.insert({ id: "u3", name: "c", age: 3 });
-    expect(orm.users.count()).toBe(3);
+    expect(orm.users.O_count()).toBe(3);
 
     writer.close();
   });
@@ -66,9 +66,9 @@ describe("BatchWriter", () => {
     const writer = orm.users.createBatchWriter({ maxBuffer: 1000, flushIntervalMs: 50 });
     writer.insert({ id: "u1", name: "a", age: 1 });
 
-    expect(orm.users.count()).toBe(0);
+    expect(orm.users.O_count()).toBe(0);
     await new Promise((r) => setTimeout(r, 100));
-    expect(orm.users.count()).toBe(1);
+    expect(orm.users.O_count()).toBe(1);
 
     writer.close();
   });
@@ -79,6 +79,6 @@ describe("BatchWriter", () => {
       writer.insert({ id: `u${i}`, name: `user-${i}`, age: i });
     }
     writer.close();
-    expect(orm.users.count()).toBe(250);
+    expect(orm.users.O_count()).toBe(250);
   });
 });

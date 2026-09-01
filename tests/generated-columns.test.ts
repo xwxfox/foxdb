@@ -50,7 +50,7 @@ describe("generated columns", () => {
   test("generated column is queryable via where", () => {
     orm.orders.insert({ id: "o1", amount: 100 });
     orm.orders.insert({ id: "o2", amount: 200 });
-    const rows = orm.orders.findMany({
+    const rows = orm.orders.O_findMany({
       where: { doubleAmount: { gte: 300 } },
     });
 

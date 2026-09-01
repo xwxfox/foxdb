@@ -5,7 +5,7 @@
 
 import { BunDatabase } from "./database.ts";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// --- Types --------------------------------------------------------------------
 
 /** @category Advanced */
 export interface InspectorColumn {
@@ -30,7 +30,7 @@ export interface InspectorTable {
   indexes: InspectorIndex[];
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 function listUserTables(db: BunDatabase): string[] {
   const stmt = db.prepare(
@@ -54,7 +54,7 @@ function getIndexColumns(db: BunDatabase, indexName: string): string[] {
   return rows.map((r) => r.name).filter((n): n is string => n != null);
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// --- Public API ---------------------------------------------------------------
 
 /** @category Advanced */
 export function inspectSchema(db: BunDatabase, tableName: string): InspectorTable {

@@ -6,8 +6,11 @@
 
 import { Database, constants, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import { TableScheduler } from "./scheduler.ts";
+import { existsSync, unlinkSync } from "node:fs";
+import { join } from "path"
 
-// ─── Typed statement wrapper ──────────────────────────────────────────────────
+import { feature } from "bun:bundle"
+// --- Typed statement wrapper --------------------------------------------------
 
 /** Narrow re-export so callers don't need to import bun:sqlite themselves */
 export type { SQLQueryBindings };
@@ -18,7 +21,7 @@ export type { SQLQueryBindings };
  */
 export type BunStatement = Statement;
 
-// ─── Pragma defaults ──────────────────────────────────────────────────────────
+// --- Pragma defaults ----------------------------------------------------------
 
 /** @category Database */
 export interface DatabaseOptions {
@@ -46,7 +49,13 @@ export interface DatabaseOptions {
   autoVacuum?: "incremental" | "full" | false;
 }
 
-// ─── foxdb Database ──────────────────────────────────────────────────────────
+export interface QueryPlanInfo {
+  sql: string;
+  planRows: any[];
+  planMs: number;
+}
+
+// --- foxdb Database ----------------------------------------------------------
 
 /**
  * sqlite database with statement caching and pragma tuning
@@ -58,10 +67,31 @@ export class BunDatabase {
 
   /** scheduler for table maintenance tasks */
   readonly scheduler = new TableScheduler();
+  private extensionStatus: "OK" | "NOT_NEEDED" | "WAITING" | "ERROR" = feature("DEBUG_SQL_BUILDING") ? "WAITING" : "NOT_NEEDED"
+
+  /** Tracks nesting depth of user-initiated transactions */
+  _txDepth = 0;
 
   constructor(opts: DatabaseOptions = {}) {
     const path = opts.path ?? ":memory:";
     this.db = new Database(path, { create: true });
+
+    // lazy load extension if needed
+    if (feature("DEBUG_SQL_BUILDING")) {
+      try {
+        // Bun allows require() to synchronously load local TypeScript modules
+        const extensionPath = join(import.meta.dir, "./sqlExtension/index.ts");
+        const mod = require(extensionPath);
+
+        this.db.loadExtension(mod.getExt(), "sqlite3_stmtstats_init");
+        this.extensionStatus = "OK";
+      } catch (err) {
+        console.error("loadExtension failed:", err);
+        this.extensionStatus = "ERROR";
+        process.exit(2);
+      }
+    }
+
 
     // WAL mode - must be set before anything else
     this.db.run("PRAGMA journal_mode = WAL;");
@@ -147,10 +177,17 @@ export class BunDatabase {
     }
     this._stmtCache.clear();
   }
+
+  /** get stmt stats from extension. Returns [] if ran without --feature DEBUG_SQL_BUILDING */
+  getStmtStats(sql: string) {
+    if (this.extensionStatus == "OK") {
+      return this.db.prepare("SELECT stmt_stats(?) AS stats").get(sql);
+    } else {
+      return []
+    }
+  }
 }
 
-import { existsSync, unlinkSync } from "node:fs";
-import type { DBRow } from "./types.ts";
 
 export function resolveDbFilePaths(path: string): string[] {
   if (path === ":memory:") return [];

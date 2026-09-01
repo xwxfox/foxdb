@@ -13,7 +13,7 @@ import { createORM, table } from "../src/index.ts";
 
 import { LogEntryType, SaleSchema } from "./real-world-types";
 
-// ─── test factory ────────────────────────────────────────────────────────────
+// --- test factory ------------------------------------------------------------
 
 function makeORM() {
   return createORM({
@@ -212,7 +212,7 @@ function createFullSale(orderNumber: number): any {
   };
 }
 
-// ─── integration tests ───────────────────────────────────────────────────────
+// --- integration tests -------------------------------------------------------
 
 describe("real-world SaleSchema integration", () => {
   test("roundtrip: insert full sale and findById hydrates everything", () => {
@@ -269,7 +269,7 @@ describe("real-world SaleSchema integration", () => {
     orm.sales.insert(createFullSale(1));
     orm.sales.insert({ ...createFullSale(2), Account: 99 });
 
-    const results = orm.sales.findMany({ where: { Account: { eq: 42 } } });
+    const results = orm.sales.O_findMany({ where: { Account: { eq: 42 } } });
     expect(results).toHaveLength(1);
     expect(results[0]!.OrderNumber).toBe(1);
 
@@ -281,7 +281,7 @@ describe("real-world SaleSchema integration", () => {
     orm.sales.insert(createFullSale(1));
     orm.sales.insert({ ...createFullSale(2), Pricing: { ...createFullSale(2).Pricing, TotalTurnoverDKK: 500 } });
 
-    const results = orm.sales.findMany({
+    const results = orm.sales.O_findMany({
       where: { "Pricing.TotalTurnoverDKK": { gt: 1000 } },
     });
     expect(results).toHaveLength(1);
@@ -295,7 +295,7 @@ describe("real-world SaleSchema integration", () => {
     orm.sales.insert(createFullSale(1));
     orm.sales.insert({ ...createFullSale(2), Status: { ...createFullSale(2).Status, Group: "TECH" } });
 
-    const results = orm.sales.findMany({
+    const results = orm.sales.O_findMany({
       where: { "Status.Group": { eq: "PNP" } },
     });
     expect(results).toHaveLength(1);
@@ -309,7 +309,7 @@ describe("real-world SaleSchema integration", () => {
     orm.sales.insert(createFullSale(1));
     orm.sales.insert({ ...createFullSale(2), HandledBy: { ...createFullSale(2).HandledBy, SalesRep: "XYZ" } });
 
-    const results = orm.sales.findMany({
+    const results = orm.sales.O_findMany({
       where: { "HandledBy.SalesRep": { eq: "ABC" } },
     });
     expect(results).toHaveLength(1);
@@ -324,7 +324,7 @@ describe("real-world SaleSchema integration", () => {
     orm.sales.insert({ ...createFullSale(2), Status: { ...createFullSale(2).Status, Group: "TECH" } });
     orm.sales.insert({ ...createFullSale(3), Pricing: { ...createFullSale(3).Pricing, TotalTurnoverDKK: 500 } });
 
-    const results = orm.sales.findMany({
+    const results = orm.sales.O_findMany({
       where: {
         AND: [
           { "Status.Group": { eq: "PNP" } },
@@ -344,7 +344,7 @@ describe("real-world SaleSchema integration", () => {
     orm.sales.insert({ ...createFullSale(2), Status: { ...createFullSale(2).Status, Group: "TECH" } });
     orm.sales.insert({ ...createFullSale(3), Status: { ...createFullSale(3).Status, Group: "RMA" } });
 
-    const results = orm.sales.findMany({
+    const results = orm.sales.O_findMany({
       where: {
         OR: [
           { "Status.Group": { eq: "PNP" } },
@@ -362,7 +362,7 @@ describe("real-world SaleSchema integration", () => {
     const orm = makeORM();
     orm.sales.insert(createFullSale(1));
 
-    const results = orm.sales.findMany({ include: ["SalesLineItems"] });
+    const results = orm.sales.O_findMany({ include: ["SalesLineItems"] });
     expect(results).toHaveLength(1);
     expect(results[0]!.SalesLineItems).toHaveLength(2);
     expect(results[0]!.SalesLineItems![0]!.ItemNumber).toBe("WID-001");
@@ -375,7 +375,7 @@ describe("real-world SaleSchema integration", () => {
     const orm = makeORM();
     orm.sales.insert(createFullSale(1));
 
-    const results = orm.sales.findMany({ include: [] });
+    const results = orm.sales.O_findMany({ include: [] });
     expect(results).toHaveLength(1);
     expect(results[0]!.SalesLineItems).toEqual([]);
 
@@ -415,7 +415,7 @@ describe("real-world SaleSchema integration", () => {
     const orm = makeORM();
     orm.sales.insert(createFullSale(1));
 
-    const results = orm.sales.findMany({
+    const results = orm.sales.O_findMany({
       select: ["Status.Group", "Pricing.TotalMargin"],
     });
     expect(results).toHaveLength(1);
@@ -432,7 +432,7 @@ describe("real-world SaleSchema integration", () => {
     orm.sales.insert(createFullSale(2));
     orm.sales.insert(createFullSale(3));
 
-    const results = orm.sales.findMany({
+    const results = orm.sales.O_findMany({
       orderBy: { column: "Status.Group", direction: "ASC" },
     });
     expect(results.map((r) => r.OrderNumber)).toEqual([1, 2, 3]);

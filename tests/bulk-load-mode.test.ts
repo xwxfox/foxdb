@@ -48,6 +48,6 @@ describe("bulk-load mode", () => {
     orm.users.insert({ id: "u2", name: "bob", age: 25 });
     orm._setBulkLoadMode(true);
     orm.users.insert({ id: "u3", name: "charlie", age: 35 });
-    expect(orm.users.count()).toBe(3);
+    expect(orm.users.O_count()).toBe(3);
   });
 });

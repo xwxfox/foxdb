@@ -1,6 +1,6 @@
 {
   "name": "@xwxfox/foxdb",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "itty bitty e2e typed orm for bun :3",
   "main": "dist/index.mjs",
   "publishConfig": {
@@ -11,6 +11,7 @@
     "build": "bunup",
     "docs": "bun run docs.ts",
     "bench": "bun run ./benchmarks/real-world-schema-bench.ts",
+    "bench:fts": "bun run ./benchmarks/fts-bench.ts",
     "release": "bun run publish.ts"
   },
   "keywords": [
