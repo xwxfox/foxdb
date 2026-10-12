@@ -149,6 +149,19 @@ function schemaConstValue(schema: TSchema): unknown {
   return toRecord(schema).const;
 }
 
+/**
+ * For `Type.Union([X, Type.Null()])`, return X (the meaningful member).
+ * Used for shape decisions (object detection for JSON decode) where the
+ * top-level guards (IsObject/IsBoolean) do not see through nullable
+ * unions. Returns null unless there is exactly one non-null member.
+ */
+function nonNullUnionMember(schema: TSchema): TSchema | null {
+  const members = schemaAnyOfMembers(schema);
+  if (!members) return null;
+  const nonNull = members.filter((m) => toRecord(m).type !== "null");
+  return nonNull.length === 1 ? nonNull[0]! : null;
+}
+
 function schemaProperties(schema: TSchema): Record<string, TSchema> | null {
   const obj = toRecord(schema);
   if (obj.properties && typeof obj.properties === "object" && obj.properties !== null) {
@@ -278,8 +291,14 @@ export function buildColumns(
     const path = prefix.length > 0 ? [...prefix, name] : undefined;
     const finalSqlType = IsObject(schema) ? "TEXT" : schemaToSqlType(schema);
     const isBool = IsBoolean(schema);
+    // A nullable-union object (Union([Obj, Null])) is stored as JSON TEXT
+    // exactly like a plain object, so decode must reflect the member shape.
+    // Without this, reads come back as raw JSON strings instead of objects
+    // (regression vs 0.1.2, which decoded them). Flattening is deliberately
+    // NOT extended to unions: that would change the on-disk layout.
+    const shapeSchema = nonNullUnionMember(schema) ?? schema;
     const decode = isBool ? ColDecode.Bool
-      : IsObject(schema) ? ColDecode.Json
+      : (IsObject(schema) || IsObject(shapeSchema)) ? ColDecode.Json
         : ColDecode.Scalar;
     cols.push({
       name: colName,

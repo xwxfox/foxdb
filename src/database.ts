@@ -66,7 +66,7 @@ export class BunDatabase {
   readonly db: Database;
 
   /** scheduler for table maintenance tasks */
-  readonly scheduler = new TableScheduler();
+  readonly scheduler: TableScheduler = new TableScheduler();
   private extensionStatus: "OK" | "NOT_NEEDED" | "WAITING" | "ERROR" = feature("DEBUG_SQL_BUILDING") ? "WAITING" : "NOT_NEEDED"
 
   /** Tracks nesting depth of user-initiated transactions */
@@ -151,12 +151,19 @@ export class BunDatabase {
     let stmt = this._stmtCache.get(sql);
     if (!stmt) {
       stmt = this.db.prepare(sql);
-      // Evict oldest entry if at capacity (Map preserves insertion order)
+      // Evict oldest entry if at capacity (Map preserves insertion order).
+      // NOTE: eviction must NOT finalize the dropped statement. The same
+      // statement object may still be referenced elsewhere - every
+      // QueryExecutor keeps its own cache of these objects, and open
+      // iterate() generators hold them across awaits. Finalizing here used
+      // to poison all of those holders: their next use threw
+      // "Statement has finalized", sticky until process restart, striking
+      // at random once traffic exceeded 256 distinct SQL shapes.
+      // Bun reclaims truly-unreferenced statements via GC, so dropping the
+      // map entry is sufficient and always safe.
       if (this._stmtCache.size >= BunDatabase._MAX_CACHE_SIZE) {
         const firstKey = this._stmtCache.keys().next().value;
         if (firstKey !== undefined) {
-          const old = this._stmtCache.get(firstKey);
-          try { old?.finalize(); } catch { /* ignore */ }
           this._stmtCache.delete(firstKey);
         }
       }
@@ -170,6 +177,17 @@ export class BunDatabase {
     this.db.run(`PRAGMA synchronous = ${mode};`);
   }
 
+  /**
+   * Drop one cached statement without finalizing it. Recovery path for
+   * holders (see QueryExecutor) whose cached object was finalized
+   * out-of-band: the shared entry may reference the same dead object, so
+   * it must go too, otherwise the next prepare() would hand the corpse
+   * right back.
+   */
+  dropCached(sql: string): void {
+    this._stmtCache.delete(sql);
+  }
+
   /** clear the statement cache */
   clearCache(): void {
     for (const stmt of this._stmtCache.values()) {
@@ -179,7 +197,7 @@ export class BunDatabase {
   }
 
   /** get stmt stats from extension. Returns [] if ran without --feature DEBUG_SQL_BUILDING */
-  getStmtStats(sql: string) {
+  getStmtStats(sql: string): unknown {
     if (this.extensionStatus == "OK") {
       return this.db.prepare("SELECT stmt_stats(?) AS stats").get(sql);
     } else {

@@ -24,13 +24,13 @@ type MetaRecord = Static<typeof MetaRecordSchema>;
 
 // --- Typed-accessor schemas ---------------------------------------------------
 
-const SchemaHashSchema = Type.String();
+const SchemaHashSchema: TSchema = Type.String();
 
-export const SchemaJSONSchema = Type.Record(Type.String(), Type.Unknown());
+export const SchemaJSONSchema: TSchema = Type.Record(Type.String(), Type.Unknown());
 
-const TablesSchema = Type.Array(Type.String());
+const TablesSchema: TSchema = Type.Array(Type.String());
 
-const RelationsSchema = Type.Array(
+const RelationsSchema: TSchema = Type.Array(
   Type.Object({
     ownerTable: Type.String(),
     ownerField: Type.String(),
@@ -41,7 +41,7 @@ const RelationsSchema = Type.Array(
   })
 );
 
-const VersionSchema = Type.String();
+const VersionSchema: TSchema = Type.String();
 
 const SchemaHashCompiled = Compile(SchemaHashSchema);
 const SchemaJSONCompiled = Compile(SchemaJSONSchema);

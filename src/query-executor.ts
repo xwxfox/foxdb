@@ -93,6 +93,34 @@ export class QueryExecutor {
     return stmt;
   }
 
+  /**
+   * True for bun:sqlite's use-after-finalize error. Bun exposes no
+   * isFinalized flag, so match the message text.
+   */
+  private static _isFinalizedError(err: unknown): boolean {
+    return err instanceof Error && err.message.includes("has finalized");
+  }
+
+  /**
+   * Run fn against the cached statement, transparently recovering once if
+   * the cached statement was finalized out-of-band (e.g. close() or
+   * clearCache() while this executor is still alive). Eviction itself no
+   * longer finalizes (see BunDatabase.prepare), so this is purely a
+   * backstop - the happy path stays a single cache hit.
+   */
+  private _withStmt<T>(sql: string, fn: (stmt: ReturnType<BunDatabase["prepare"]>) => T): T {
+    try {
+      return fn(this._getStmt(sql));
+    } catch (err) {
+      if (!QueryExecutor._isFinalizedError(err)) throw err;
+      // Drop from BOTH caches: the shared entry may reference the same
+      // dead object, and re-preparing without dropping would return it.
+      this.stmtCache.delete(sql);
+      this.db.dropCached(sql);
+      return fn(this._getStmt(sql));
+    }
+  }
+
   private _debugQueryPlan(sql: string, params: SQLQueryBindings[]) {
     if (!feature("DEBUG_SQL_BUILDING")) return undefined;
 
@@ -149,14 +177,14 @@ export class QueryExecutor {
       const p = this._debugQueryPlan(sql, b);
       traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: b.length, plan: p });
       const s = performance.now();
-      const r = this._getStmt(sql).run(...b);
+      const r = this._withStmt(sql, (stmt) => stmt.run(...b));
       const d = performance.now() - s;
       this._emit(operation, sql, d, r.changes);
       traceEnd({ durMs: d, sql: sql.slice(0, 160), rowCount: r.changes });
       return r;
     }
     const start = performance.now();
-    const result = this._getStmt(sql).run(...(params ?? []));
+    const result = this._withStmt(sql, (stmt) => stmt.run(...(params ?? [])));
     this._emit(operation, sql, performance.now() - start, result.changes);
     return result;
   }
@@ -168,14 +196,14 @@ export class QueryExecutor {
       const p = this._debugQueryPlan(sql, b);
       traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: b.length, plan: p });
       const s = performance.now();
-      const rows = this._getStmt(sql).all(...b) as T[];
+      const rows = this._withStmt(sql, (stmt) => stmt.all(...b)) as T[];
       const d = performance.now() - s;
       this._emit(operation, sql, d, rows.length);
       traceEnd({ durMs: d, sql: sql.slice(0, 160), rowCount: rows.length });
       return rows;
     }
     const start = performance.now();
-    const rows = this._getStmt(sql).all(...(params ?? [])) as T[];
+    const rows = this._withStmt(sql, (stmt) => stmt.all(...(params ?? []))) as T[];
     this._emit(operation, sql, performance.now() - start, rows.length);
     return rows;
   }
@@ -187,18 +215,25 @@ export class QueryExecutor {
       const p = this._debugQueryPlan(sql, b);
       traceBegin(`sql.${operation}`, { sql: sql.slice(0, 160), paramsCount: b.length, plan: p });
       const s = performance.now();
-      const row = this._getStmt(sql).get(...b) as T | undefined;
+      const row = this._withStmt(sql, (stmt) => stmt.get(...b)) as T | undefined;
       const d = performance.now() - s;
       this._emit(operation, sql, d, row ? 1 : 0);
       traceEnd({ durMs: d, sql: sql.slice(0, 160), rowCount: row ? 1 : 0 });
       return row ?? null;
     }
     const start = performance.now();
-    const row = this._getStmt(sql).get(...(params ?? [])) as T | undefined;
+    const row = this._withStmt(sql, (stmt) => stmt.get(...(params ?? []))) as T | undefined;
     this._emit(operation, sql, performance.now() - start, row ? 1 : 0);
     return row ?? null;
   }
 
+  /**
+   * Lazily pulls rows. Deliberately NOT wrapped in _withStmt: a retry would
+   * restart the generator and duplicate already-yielded rows. Safe anyway:
+   * eviction no longer finalizes (see BunDatabase.prepare), so an open
+   * generator can only be stranded by close()/clearCache(), which must not
+   * overlap live iteration.
+   */
   *iterate<T>(
     sql: string,
     params?: SQLQueryBindings[],

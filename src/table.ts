@@ -37,7 +37,7 @@ export interface TableConfigShape<
   softDelete?: import("./types.ts").SoftDeleteConfig;
   generated?: G;
   fts?: F;
-  /** Auto-index TEXT columns on sub-tables. Defaults to true. Set false to disable. */
+  /** Auto-index TEXT columns on sub-tables. Defaults to false. Set true to enable. */
   autoIndex?: boolean;
 }
 

@@ -23,7 +23,7 @@ export class BatchWriter<TInput, TRow extends Record<string, unknown>> {
   constructor(
     tableName: string,
     db: BunDatabase,
-    opts: BatchWriterOptions = {},
+    opts: BatchWriterOptions | undefined = {},
     callbacks: { prepare: (row: TInput) => TRow; onFlush?: (rows: TRow[]) => void }
   ) {
     this.tableName = tableName;

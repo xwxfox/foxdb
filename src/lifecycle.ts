@@ -86,18 +86,18 @@ export class LifecycleManager<
   private _shutdown = false;
 
   /** true after runReady completes */
-  get isReady() { return this._ready; }
+  get isReady(): boolean { return this._ready; }
   /** true after runShutdown completes */
-  get isShutdown() { return this._shutdown; }
+  get isShutdown(): boolean { return this._shutdown; }
 
   /** register a startup hook */
-  onStart(hook: LifecycleHook<T, Rels>) { this.startHooks.push(hook); }
+  onStart(hook: LifecycleHook<T, Rels>): void { this.startHooks.push(hook); }
   /** register a ready hook */
-  onReady(hook: LifecycleHook<T, Rels>) { this.readyHooks.push(hook); }
+  onReady(hook: LifecycleHook<T, Rels>): void { this.readyHooks.push(hook); }
   /** register a shutdown hook */
-  onShutdown(hook: LifecycleHook<T, Rels>) { this.shutdownHooks.push(hook); }
+  onShutdown(hook: LifecycleHook<T, Rels>): void { this.shutdownHooks.push(hook); }
   /** register an exit hook */
-  onExit(hook: LifecycleHook<T, Rels>) { this.exitHooks.push(hook); }
+  onExit(hook: LifecycleHook<T, Rels>): void { this.exitHooks.push(hook); }
 
   /** @internal */
   runStart(ctx: ORMContext<T, Rels>): void {
